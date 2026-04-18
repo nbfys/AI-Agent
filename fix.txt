@@ -1,0 +1,166 @@
+## 发现了三个根本性错误
+
+日志已经暴露了一切，逐条分析：
+
+---
+
+## 🔴 错误一：Trae 放弃了 Spring AI，改成手写 HTTP 调用（最严重）
+
+```
+[LLMService] 流式调用发送请求到：http://localhost:11434/api/generate
+```
+
+Spring AI 内置了完整的 Ollama 支持，Trae 却绕开它直接手写 HTTP 请求，引入了下面所有问题。
+
+---
+
+## 🔴 错误二：用了错误的 Ollama 端点
+
+```
+❌ /api/generate   → 单轮补全接口，不支持多轮对话 messages 数组
+✅ /api/chat       → 多轮对话接口，支持 system/user/assistant 消息
+```
+
+---
+
+## 🔴 错误三：强制 JSON 格式导致自然语言消失
+
+```json
+{"stream":true,"format":"json",...}
+```
+
+`"format":"json"` 告诉 Ollama **只输出纯 JSON**，自然语言被完全压制，这就是为什么页面上没有面试官的聊天内容。
+
+---
+
+## 🔴 错误四：历史顺序还是反的
+
+```
+[DEBUG] history[0]: AI：          ← AI 在前（而且是空的）
+[DEBUG] history[1]: 用户：你好    ← 用户在后
+```
+
+Redis 修复后顺序对了，但存入时 AI 回复是空字符串，说明流式响应没有被正确读取。
+
+---
+
+## 完整修复：回归 Spring AI 标准用法
+
+### 第一步：`application.yml` 配置 Ollama
+
+```yaml
+spring:
+  ai:
+    ollama:
+      base-url: http://localhost:11434
+      chat:
+        options:
+          model: qwen3.5:2b
+    dashscope:
+      api-key: "${DASHSCOPE_API_KEY:}"
+      chat:
+        options:
+          model: qwen-turbo
+```
+
+### 第二步：`pom.xml` 确认有 Ollama 依赖
+
+```xml
+<dependency>
+    <groupId>org.springframework.ai</groupId>
+    <artifactId>spring-ai-starter-model-ollama</artifactId>
+</dependency>
+```
+
+### 第三步：`LLMService.java` 完整恢复为 Spring AI 标准写法
+
+把 Trae 的所有手写 HTTP 改动全部回退，恢复为最初的版本：
+
+```java
+@Service
+public class LLMService {
+
+    private final ChatClient chatClient;
+    private final ObjectMapper objectMapper;
+
+    @Value("${spring.ai.dashscope.api-key:}")
+    private String apiKey;
+
+    @Value("classpath:prompts/interviewer.md")
+    private Resource interviewerPromptResource;
+
+    // ✅ 直接注入 Spring AI 的 ChatClient.Builder
+    // Spring AI 会根据 application.yml 自动选择 Ollama 或 DashScope
+    public LLMService(ChatClient.Builder chatClientBuilder) {
+        this.chatClient = chatClientBuilder.build();
+        this.objectMapper = new ObjectMapper();
+    }
+
+    // ✅ 普通同步调用
+    public String generateResponse(String systemPrompt,
+                                    String userMessage,
+                                    List<String> history) {
+        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
+        try {
+            return chatClient
+                    .prompt(new Prompt(messages))
+                    .call()
+                    .content();
+        } catch (Exception e) {
+            throw new RuntimeException("LLM 调用失败：" + e.getMessage(), e);
+        }
+    }
+
+    // ✅ 流式调用
+    public Flux<String> generateStream(String systemPrompt,
+                                        String userMessage,
+                                        List<String> history) {
+        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
+        try {
+            return chatClient
+                    .prompt(new Prompt(messages))
+                    .stream()
+                    .content();
+        } catch (Exception e) {
+            return Flux.error(
+                new RuntimeException("LLM 流式调用失败：" + e.getMessage(), e));
+        }
+    }
+
+    // 其余方法（buildMessages、trimHistory、parseStructuredOutput 等）保持不变
+}
+```
+
+---
+
+## 修复后验证步骤
+
+重启后日志应该变成：
+
+```
+# ✅ 不再出现手写 HTTP 的日志
+# ❌ 消失：[LLMService] 流式调用发送请求到：http://localhost:11434/api/generate
+# ❌ 消失：[LLMService] 流式调用请求体：{...}
+
+# ✅ 历史记录正确
+[DEBUG] history[0]: 用户：你好
+[DEBUG] history[1]: AI：您好，我是本次技术面试官...（有实际内容）
+
+# ✅ 面试官消息正常显示在前端
+```
+
+---
+
+## 给 Trae 的明确指令
+
+```
+请将 LLMService.java 完全回退到使用 Spring AI ChatClient 的版本。
+具体要求：
+1. 删除所有手写 HTTP 调用代码（WebClient/RestTemplate 调用 Ollama 的部分）
+2. 删除 "format":"json" 相关代码
+3. 恢复使用 ChatClient.Builder 注入和 chatClient.prompt(new Prompt(messages)) 调用
+4. application.yml 中配置 spring.ai.ollama.base-url 和 model
+5. 不要修改 LLMService 的公共方法签名
+```
+
+**把修复后的 `LLMService.java` 贴出来确认，确保没有任何手写 HTTP 的痕迹。**

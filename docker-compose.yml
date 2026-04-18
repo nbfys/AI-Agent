@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mysql-interview
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456  # 与 application.yml 中的密码一致
+      MYSQL_DATABASE: interview_db  # 自动创建数据库
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"  # 映射端口到本地
+    volumes:
+      - mysql-data:/var/lib/mysql  # 持久化数据
+    restart: always
+
+  redis:
+    image: redis:7.0
+    container_name: redis-interview
+    ports:
+      - "6379:6379"  # 映射端口到本地
+    volumes:
+      - redis-data:/data  # 持久化数据
+    restart: always
+
+volumes:
+  mysql-data:
+  redis-data:

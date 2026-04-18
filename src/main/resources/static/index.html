@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 面试助手</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- marked.js -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.0.0/marked.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+        
+        body {
+            font-family: 'Noto Sans SC', sans-serif;
+        }
+        
+        .chat-container {
+            height: calc(100vh - 12rem);
+            overflow-y: auto;
+        }
+        
+        .chat-message {
+            max-width: 80%;
+            margin-bottom: 1rem;
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }
+        
+        .ai-message {
+            background-color: #f3f4f6;
+            border-top-left-radius: 0;
+            align-self: flex-start;
+        }
+        
+        .user-message {
+            background-color: #3b82f6;
+            color: white;
+            border-top-right-radius: 0;
+            align-self: flex-end;
+        }
+        
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        
+        .typing-dot {
+            width: 0.5rem;
+            height: 0.5rem;
+            background-color: #6b7280;
+            border-radius: 50%;
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+        
+        .typing-dot:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+        
+        .typing-dot:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+        
+        @keyframes typing {
+            0%, 80%, 100% {
+                transform: scale(0);
+            }
+            40% {
+                transform: scale(1);
+            }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app" class="flex h-screen">
+        <!-- 左侧侧边栏 -->
+        <div class="w-1/3 bg-white border-r border-gray-200 p-6">
+            <div class="flex justify-between items-center mb-6">
+                <h1 class="text-2xl font-bold text-gray-800">AI 面试助手</h1>
+                <span v-if="mode" class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
+                    {{ mode }}
+                </span>
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">目标岗位 JD</label>
+                <textarea 
+                    v-model="jdContent" 
+                    class="w-full p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="请粘贴目标岗位 JD..."
+                    rows="6"
+                    :disabled="isInterviewing"
+                ></textarea>
+            </div>
+            
+            <div class="mb-6">
+                <label class="block text-sm font-medium text-gray-700 mb-1">上传简历 (PDF)</label>
+                <input 
+                    type="file" 
+                    accept=".pdf" 
+                    @change="handleFileUpload"
+                    class="w-full p-3 border border-gray-300 rounded-md"
+                    :disabled="isInterviewing"
+                >
+                <p v-if="resumeName" class="text-sm text-gray-600 mt-1">{{ resumeName }}</p>
+            </div>
+            
+            <button 
+                @click="startInterview"
+                class="w-full bg-blue-500 text-white py-3 px-4 rounded-md hover:bg-blue-600 transition-colors"
+                :disabled="!jdContent || !resumeFile || isInterviewing"
+            >
+                {{ isInterviewing ? '面试中...' : '开始模拟面试' }}
+            </button>
+        </div>
+        
+        <!-- 右侧主区域 -->
+        <div class="w-2/3 flex flex-col bg-gray-50">
+            <!-- 状态显示 -->
+            <div class="p-4 bg-white border-b border-gray-200">
+                <div class="flex flex-wrap gap-4 text-sm">
+                    <div>面试模式：<span class="font-medium">{{ mode || '未开始' }}</span></div>
+                    <div>会话ID：<span id="sessionId">{{ sessionId }}</span></div>
+                    <div>当前阶段：<span id="currentStage" class="font-medium">{{ currentStage || '未开始' }}</span></div>
+                    <div>阶段轮次：<span id="stageTurnCount">{{ stageTurnCount || 0 }}</span>/4</div>
+                    <div>总轮次：<span id="totalTurns">{{ totalTurns || 0 }}</span>/20</div>
+                </div>
+                
+                <!-- 评分显示 -->
+                <div id="scoresContainer" class="mt-3 p-3 bg-gray-50 rounded-lg" v-if="scores">
+                    <h4 class="font-medium mb-2">评分反馈</h4>
+                    <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
+                        <div class="text-center">
+                            <div class="text-xs text-gray-500">表达清晰度</div>
+                            <div id="clarityScore" class="font-medium">{{ scores.clarity || 0 }}</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-xs text-gray-500">技术深度</div>
+                            <div id="depthScore" class="font-medium">{{ scores.depth || 0 }}</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-xs text-gray-500">证据与量化</div>
+                            <div id="evidenceScore" class="font-medium">{{ scores.evidence || 0 }}</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-xs text-gray-500">权衡取舍</div>
+                            <div id="tradeoffScore" class="font-medium">{{ scores.tradeoff || 0 }}</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-xs text-gray-500">复盘改进</div>
+                            <div id="retrospectScore" class="font-medium">{{ scores.retrospect || 0 }}</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 问题标签 -->
+                <div id="tagsContainer" class="mt-2" v-if="questionTags && questionTags.length > 0">
+                    <div class="flex flex-wrap gap-2">
+                        <span class="text-xs text-gray-500">问题标签：</span>
+                        <div id="questionTags" class="flex flex-wrap gap-1">
+                            <span v-for="tag in questionTags" :key="tag" class="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
+                                {{ tag }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 聊天展示区 -->
+            <div class="chat-container flex flex-col p-6 space-y-4">
+                <div 
+                    v-for="(message, index) in messages" 
+                    :key="index"
+                    class="chat-message" 
+                    :class="message.type === 'ai' ? 'ai-message' : 'user-message'"
+                >
+                    <div v-if="message.type === 'ai'" class="text-sm text-gray-500 mb-1">面试官</div>
+                    <div v-else class="text-sm text-gray-300 mb-1">你</div>
+                    <div v-html="message.content"></div>
+                </div>
+                
+                <!-- 打字指示器 -->
+                <div v-if="isTyping" class="chat-message ai-message">
+                    <div class="text-sm text-gray-500 mb-1">面试官</div>
+                    <div class="typing-indicator">
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                        <div class="typing-dot"></div>
+                    </div>
+                </div>
+                
+                <!-- 错误提示 -->
+                <div v-if="errorMessage" class="chat-message bg-red-100 text-red-800">
+                    <div class="text-sm font-medium mb-1">错误</div>
+                    <div>{{ errorMessage }}</div>
+                </div>
+                
+                <!-- 面试结束提示 -->
+                <div v-if="isInterviewEnded" class="chat-message bg-green-100 text-green-800">
+                    <div class="text-sm font-medium mb-1">面试结束</div>
+                    <div>面试已结束，点击下方按钮查看评估报告。</div>
+                </div>
+            </div>
+            
+            <!-- 用户输入区 -->
+            <div class="p-6 border-t border-gray-200">
+                <div class="flex space-x-2">
+                    <textarea 
+                        v-model="userInput" 
+                        class="flex-1 p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="请输入你的回答..."
+                        rows="3"
+                        :disabled="!sessionId || isInterviewEnded"
+                    ></textarea>
+                    <button 
+                        @click="sendMessage"
+                        class="bg-blue-500 text-white py-3 px-6 rounded-md hover:bg-blue-600 transition-colors"
+                        :disabled="!sessionId || !userInput.trim() || isInterviewEnded"
+                    >
+                        发送
+                    </button>
+                </div>
+                <div class="mt-4 flex justify-end">
+                    <button 
+                        @click="endInterview"
+                        class="bg-gray-500 text-white py-2 px-4 rounded-md hover:bg-gray-600 transition-colors"
+                        :disabled="!sessionId"
+                    >
+                        结束面试
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const { createApp } = Vue;
+        
+        createApp({
+            data() {
+                return {
+                    jdContent: '',
+                    resumeFile: null,
+                    resumeName: '',
+                    sessionId: null,
+                    mode: null,
+                    isInterviewing: false,
+                    isInterviewEnded: false,
+                    messages: [],
+                    userInput: '',
+                    isTyping: false,
+                    errorMessage: '',
+                    eventSource: null,
+                    currentStage: null,
+                    stageTurnCount: 0,
+                    totalTurns: 0,
+                    scores: null,
+                    questionTags: []
+                };
+            },
+            methods: {
+                handleFileUpload(e) {
+                    this.resumeFile = e.target.files[0];
+                    if (this.resumeFile) {
+                        this.resumeName = this.resumeFile.name;
+                    } else {
+                        this.resumeName = '';
+                    }
+                },
+                
+                async startInterview() {
+                    if (!this.jdContent || !this.resumeFile) return;
+                    
+                    this.isInterviewing = true;
+                    this.errorMessage = '';
+                    
+                    // 创建 FormData
+                    const formData = new FormData();
+                    formData.append('resume', this.resumeFile);
+                    formData.append('jdContent', this.jdContent);
+                    
+                    try {
+                        // 调用初始化接口
+                        const response = await fetch('/api/interview/init', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        const result = await response.json();
+                        if (result.code === 200) {
+                            this.sessionId = result.data.sessionId;
+                            this.mode = result.data.mode;
+                            // 建立 SSE 连接获取初始问题
+                            this.connectSSE();
+                        } else {
+                            this.errorMessage = '初始化失败：' + result.msg;
+                            this.isInterviewing = false;
+                        }
+                    } catch (error) {
+                        console.error('初始化失败：', error);
+                        this.errorMessage = '初始化失败，请检查网络连接';
+                        this.isInterviewing = false;
+                    }
+                },
+                
+                async sendMessage() {
+                    if (!this.userInput.trim() || !this.sessionId) return;
+                    
+                    // 添加用户消息到聊天界面
+                    this.messages.push({
+                        type: 'user',
+                        content: this.userInput
+                    });
+                    
+                    // 保存用户输入
+                    const userMessage = this.userInput;
+                    // 清空输入框
+                    this.userInput = '';
+                    // 滚动到底部
+                    this.scrollToBottom();
+                    
+                    try {
+                        // 调用发送消息接口
+                        const response = await fetch('/api/interview/chat/send', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                sessionId: this.sessionId,
+                                userMessage: userMessage
+                            })
+                        });
+                        
+                        const result = await response.json();
+                        if (result.code === 200) {
+                            const messageId = result.data.messageId;
+                            // 建立 SSE 连接发送用户消息
+                            this.connectSSE(messageId);
+                        } else {
+                            this.errorMessage = '发送失败：' + result.msg;
+                        }
+                    } catch (error) {
+                        console.error('发送失败：', error);
+                        this.errorMessage = '发送失败，请检查网络连接';
+                    }
+                },
+                
+                connectSSE(messageId = null) {
+                    if (this.eventSource) {
+                        this.eventSource.close();
+                    }
+                    
+                    this.isTyping = true;
+                    this.errorMessage = '';
+                    
+                    let url = `/api/interview/chat/stream?sessionId=${this.sessionId}`;
+                    if (messageId) {
+                        url += `&messageId=${messageId}`;
+                    }
+                    
+                    this.eventSource = new EventSource(url);
+                    let aiResponse = '';
+                    let isNormalClose = false; // 新增：标记是否正常关闭
+                    
+                    this.eventSource.onmessage = (event) => {
+                        aiResponse += event.data;
+                        // 实时渲染，不等连接关闭
+                        this.updateLastAiMessage(aiResponse);
+                    };
+                    
+                    this.eventSource.onopen = () => {
+                        console.log('SSE 连接已建立');
+                    };
+                    
+                    // 正常结束标记
+                    this.eventSource.addEventListener('end', (event) => {
+                        console.log('面试结束');
+                        isNormalClose = true;
+                        this.isInterviewEnded = true;
+                    });
+                    
+                    // 状态更新
+                    this.eventSource.addEventListener('status', (event) => {
+                        try {
+                            const statusData = JSON.parse(event.data);
+                            console.log('状态更新：', statusData);
+                            this.currentStage = statusData.stage;
+                            this.stageTurnCount = statusData.stageTurnCount;
+                            this.totalTurns = statusData.totalTurns;
+                            this.scores = statusData.scores;
+                            this.questionTags = statusData.questionTags || [];
+                            
+                            isNormalClose = true;
+                            
+                            if (aiResponse) {
+                                const lastIndex = this.messages.length - 1;
+                                const lastMsg = this.messages[lastIndex];
+                                
+                                // 流式结束，用完整 Markdown 渲染替换原始文本
+                                if (lastMsg && lastMsg.streaming) {
+                                    // Vue 3 中直接修改响应式对象
+                                    this.messages[lastIndex] = {
+                                        type: 'ai',
+                                        content: marked.parse(aiResponse), // 最终渲染 Markdown
+                                        streaming: false  // 去掉流式标记
+                                    };
+                                }
+                                
+                                aiResponse = '';
+                                setTimeout(() => this.scrollToBottom(), 0);
+                            }
+                            
+                            this.isTyping = false; // 收到 status 才算真正完成
+                            
+                        } catch (error) {
+                            console.error('解析状态更新失败：', error);
+                        }
+                    });
+                    
+                    // 修复：区分正常关闭和真实错误
+                    this.eventSource.addEventListener('error', (event) => {
+                        this.eventSource.close();
+                        this.isTyping = false;
+                        
+                        if (isNormalClose) {
+                            // 正常结束触发的 error，忽略
+                            console.log('SSE 正常关闭');
+                            return;
+                        }
+                        
+                        // 真实错误：连接从未正常完成
+                        console.error('SSE 真实错误：', event);
+                        this.errorMessage = 'AI 服务暂时不可用，请稍后重试';
+                    });
+                },
+                
+                // 新增辅助方法：实时更新最后一条 AI 消息
+                updateLastAiMessage(content) {
+                    const lastIndex = this.messages.length - 1;
+                    const lastMsg = this.messages[lastIndex];
+                    
+                    if (lastMsg && lastMsg.type === 'ai' && lastMsg.streaming) {
+                        // 用 Vue.set 或 $set 触发响应式更新
+                        this.$set(this.messages, lastIndex, {
+                            ...lastMsg,
+                            content: content
+                        });
+                    } else {
+                        // 新增一条流式消息
+                        this.messages.push({ 
+                            type: 'ai', 
+                            content: content, 
+                            streaming: true 
+                        });
+                        this.$nextTick(() => this.scrollToBottom());
+                    }
+                },
+                
+                async endInterview() {
+                    if (!this.sessionId) return;
+                    
+                    try {
+                        // 调用评估接口
+                        const response = await fetch('/api/interview/evaluate', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                sessionId: this.sessionId
+                            })
+                        });
+                        
+                        const result = await response.json();
+                        if (result.code === 200) {
+                            // 渲染评估报告
+                            const renderedReport = marked.parse(result.data.report);
+                            this.messages.push({
+                                type: 'ai',
+                                content: `# 面试评估报告\n${renderedReport}`
+                            });
+                            // 滚动到底部
+                            this.scrollToBottom();
+                            // 标记面试结束
+                            this.isInterviewEnded = true;
+                        } else {
+                            this.errorMessage = '评估失败：' + result.msg;
+                        }
+                    } catch (error) {
+                        console.error('评估失败：', error);
+                        this.errorMessage = '评估失败，请检查网络连接';
+                    }
+                },
+                
+                scrollToBottom() {
+                    setTimeout(() => {
+                        const chatContainer = document.querySelector('.chat-container');
+                        chatContainer.scrollTop = chatContainer.scrollHeight;
+                    }, 100);
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
