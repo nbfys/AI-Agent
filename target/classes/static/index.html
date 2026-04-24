@@ -400,13 +400,29 @@
                                 const lastIndex = this.messages.length - 1;
                                 const lastMsg = this.messages[lastIndex];
                                 
-                                // 流式结束，用完整 Markdown 渲染替换原始文本
+                                // 解析AI响应，只提取next_question显示在气泡框中
+                                let displayContent = aiResponse;
+                                try {
+                                    // 尝试从响应中解析JSON
+                                    const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                                    if (jsonMatch) {
+                                        const parsedResponse = JSON.parse(jsonMatch[0]);
+                                        if (parsedResponse.next_question) {
+                                            // 只显示next_question
+                                            displayContent = parsedResponse.next_question;
+                                        }
+                                    }
+                                } catch (e) {
+                                    // 如果解析失败，使用原始内容但做简化处理
+                                    console.log('解析JSON失败，使用原始内容:', e);
+                                }
+                                
+                                // 流式结束，用处理后的内容渲染
                                 if (lastMsg && lastMsg.streaming) {
-                                    // Vue 3 中直接修改响应式对象
                                     this.messages[lastIndex] = {
                                         type: 'ai',
-                                        content: marked.parse(aiResponse), // 最终渲染 Markdown
-                                        streaming: false  // 去掉流式标记
+                                        content: marked.parse(displayContent),
+                                        streaming: false
                                     };
                                 }
                                 
@@ -414,7 +430,7 @@
                                 setTimeout(() => this.scrollToBottom(), 0);
                             }
                             
-                            this.isTyping = false; // 收到 status 才算真正完成
+                            this.isTyping = false;
                             
                         } catch (error) {
                             console.error('解析状态更新失败：', error);

@@ -1,166 +1,376 @@
-## 发现了三个根本性错误
+🔴 核心问题：当前实现与设计的偏差
+问题1：短期记忆没有实现滑动窗口 🔴
+原始设计
+text
 
-日志已经暴露了一切，逐条分析：
+短期记忆：Redis List 存储最近 10 条对话
+每次更新使用 Lua 脚本执行 RPUSH + LTRIM，确保原子性滑动
+当前实现
+Java
 
----
-
-## 🔴 错误一：Trae 放弃了 Spring AI，改成手写 HTTP 调用（最严重）
-
-```
-[LLMService] 流式调用发送请求到：http://localhost:11434/api/generate
-```
-
-Spring AI 内置了完整的 Ollama 支持，Trae 却绕开它直接手写 HTTP 请求，引入了下面所有问题。
-
----
-
-## 🔴 错误二：用了错误的 Ollama 端点
-
-```
-❌ /api/generate   → 单轮补全接口，不支持多轮对话 messages 数组
-✅ /api/chat       → 多轮对话接口，支持 system/user/assistant 消息
-```
-
----
-
-## 🔴 错误三：强制 JSON 格式导致自然语言消失
-
-```json
-{"stream":true,"format":"json",...}
-```
-
-`"format":"json"` 告诉 Ollama **只输出纯 JSON**，自然语言被完全压制，这就是为什么页面上没有面试官的聊天内容。
-
----
-
-## 🔴 错误四：历史顺序还是反的
-
-```
-[DEBUG] history[0]: AI：          ← AI 在前（而且是空的）
-[DEBUG] history[1]: 用户：你好    ← 用户在后
-```
-
-Redis 修复后顺序对了，但存入时 AI 回复是空字符串，说明流式响应没有被正确读取。
-
----
-
-## 完整修复：回归 Spring AI 标准用法
-
-### 第一步：`application.yml` 配置 Ollama
-
-```yaml
-spring:
-  ai:
-    ollama:
-      base-url: http://localhost:11434
-      chat:
-        options:
-          model: qwen3.5:2b
-    dashscope:
-      api-key: "${DASHSCOPE_API_KEY:}"
-      chat:
-        options:
-          model: qwen-turbo
-```
-
-### 第二步：`pom.xml` 确认有 Ollama 依赖
-
-```xml
-<dependency>
-    <groupId>org.springframework.ai</groupId>
-    <artifactId>spring-ai-starter-model-ollama</artifactId>
-</dependency>
-```
-
-### 第三步：`LLMService.java` 完整恢复为 Spring AI 标准写法
-
-把 Trae 的所有手写 HTTP 改动全部回退，恢复为最初的版本：
-
-```java
-@Service
-public class LLMService {
-
-    private final ChatClient chatClient;
-    private final ObjectMapper objectMapper;
-
-    @Value("${spring.ai.dashscope.api-key:}")
-    private String apiKey;
-
-    @Value("classpath:prompts/interviewer.md")
-    private Resource interviewerPromptResource;
-
-    // ✅ 直接注入 Spring AI 的 ChatClient.Builder
-    // Spring AI 会根据 application.yml 自动选择 Ollama 或 DashScope
-    public LLMService(ChatClient.Builder chatClientBuilder) {
-        this.chatClient = chatClientBuilder.build();
-        this.objectMapper = new ObjectMapper();
-    }
-
-    // ✅ 普通同步调用
-    public String generateResponse(String systemPrompt,
-                                    String userMessage,
-                                    List<String> history) {
-        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
-        try {
-            return chatClient
-                    .prompt(new Prompt(messages))
-                    .call()
-                    .content();
-        } catch (Exception e) {
-            throw new RuntimeException("LLM 调用失败：" + e.getMessage(), e);
-        }
-    }
-
-    // ✅ 流式调用
-    public Flux<String> generateStream(String systemPrompt,
-                                        String userMessage,
-                                        List<String> history) {
-        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
-        try {
-            return chatClient
-                    .prompt(new Prompt(messages))
-                    .stream()
-                    .content();
-        } catch (Exception e) {
-            return Flux.error(
-                new RuntimeException("LLM 流式调用失败：" + e.getMessage(), e));
-        }
-    }
-
-    // 其余方法（buildMessages、trimHistory、parseStructuredOutput 等）保持不变
+// RedisMemoryService.java
+public void addMessage(String sessionId, String message) {
+    String key = "interview:history:" + sessionId;
+    redisTemplate.opsForList().rightPush(key, message);
+    // ❌ 没有 LTRIM，导致历史记录无限增长！
+    redisTemplate.expire(key, 2, TimeUnit.HOURS);
 }
-```
+问题影响
+text
 
----
+第1轮：存1条  → Redis: [msg1]
+第2轮：存2条  → Redis: [msg1, msg2]
+...
+第20轮：存20条 → Redis: [msg1, msg2, ..., msg20]  ❌ 应该只保留10条！
 
-## 修复后验证步骤
+结果：
+1. 传给LLM的历史越来越长，Token消耗增加
+2. buildCompletePrompt 中只取最近5个问题，但Redis里存了20个
+3. 导致LLM看不到完整的已问问题列表！
+修复方案
+方案1：使用 Lua 脚本（原设计方案）
 
-重启后日志应该变成：
+Java
 
-```
-# ✅ 不再出现手写 HTTP 的日志
-# ❌ 消失：[LLMService] 流式调用发送请求到：http://localhost:11434/api/generate
-# ❌ 消失：[LLMService] 流式调用请求体：{...}
+// RedisMemoryService.java
 
-# ✅ 历史记录正确
-[DEBUG] history[0]: 用户：你好
-[DEBUG] history[1]: AI：您好，我是本次技术面试官...（有实际内容）
+/**
+ * 使用 Lua 脚本原子性地添加消息并保持滑动窗口
+ */
+public void addMessage(String sessionId, String message) {
+    String key = "interview:history:" + sessionId;
+    
+    // Lua 脚本：RPUSH + LTRIM 原子操作
+    String luaScript = 
+        "redis.call('RPUSH', KEYS[1], ARGV[1]) " +
+        "redis.call('LTRIM', KEYS[1], -10, -1) " +  // 保留最近10条
+        "return redis.call('LLEN', KEYS[1])";
+    
+    RedisScript<Long> script = RedisScript.of(luaScript, Long.class);
+    Long size = redisTemplate.execute(
+        script,
+        Collections.singletonList(key),
+        message
+    );
+    
+    log.debug("消息已添加，当前历史记录数量: {}, sessionId: {}", size, sessionId);
+    
+    // 设置过期时间
+    redisTemplate.expire(key, 2, TimeUnit.HOURS);
+}
+方案2：使用 Spring Redis Pipeline（性能更好）
 
-# ✅ 面试官消息正常显示在前端
-```
+Java
 
----
+public void addMessage(String sessionId, String message) {
+    String key = "interview:history:" + sessionId;
+    
+    redisTemplate.executePipelined(new SessionCallback<Object>() {
+        @Override
+        public Object execute(RedisOperations operations) throws DataAccessException {
+            operations.opsForList().rightPush(key, message);
+            operations.opsForList().trim(key, -10, -1); // 保留最近10条
+            operations.expire(key, 2, TimeUnit.HOURS);
+            return null;
+        }
+    });
+}
+问题2：防复读机制的实现有严重 Bug 🔴
+原始设计
+text
 
-## 给 Trae 的明确指令
+防复读：将生成的问题与 Redis 中的 interview:asked:{sessionId} 进行相似度比对
+当前实现的Bug
+Bug 2.1：buildCompletePrompt 只传递最近5个已问问题
 
-```
-请将 LLMService.java 完全回退到使用 Spring AI ChatClient 的版本。
-具体要求：
-1. 删除所有手写 HTTP 调用代码（WebClient/RestTemplate 调用 Ollama 的部分）
-2. 删除 "format":"json" 相关代码
-3. 恢复使用 ChatClient.Builder 注入和 chatClient.prompt(new Prompt(messages)) 调用
-4. application.yml 中配置 spring.ai.ollama.base-url 和 model
-5. 不要修改 LLMService 的公共方法签名
-```
+Java
 
-**把修复后的 `LLMService.java` 贴出来确认，确保没有任何手写 HTTP 的痕迹。**
+// InterviewController.java 第 275-283 行
+List<String> recentAskedQuestions = askedQuestions.size() > 5
+        ? askedQuestions.subList(askedQuestions.size() - 5, askedQuestions.size())
+        : askedQuestions;  // ❌ 只传递最近5个！
+结果：
+
+text
+
+Redis 中存储：[Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8]（8个问题）
+传给 LLM 的：[Q4, Q5, Q6, Q7, Q8]（最近5个）
+
+第9轮：LLM 不知道 Q1-Q3 存在
+      → 可能生成与 Q1 相似的问题
+      → 检测到重复
+      → 重新生成
+      → LLM 还是只知道 Q4-Q8
+      → 又生成相似的
+      → 死循环！
+Bug 2.2：相似度算法过于简单
+
+Java
+
+// 当前实现（第 627-647 行）
+if (normalizedNew.contains(normalizedExisting) || normalizedExisting.contains(normalizedNew)) {
+    int lenDiff = Math.abs(normalizedNew.length() - normalizedExisting.length());
+    if (lenDiff <= 20) {
+        return true;  // ❌ 容易误判
+    }
+}
+误判案例：
+
+text
+
+Q1: "请介绍你的Redis使用经验"
+Q2: "在高并发场景下，Redis如何保证数据一致性？"
+
+标准化后：
+Q1: "请介绍你的redis使用经验"
+Q2: "在高并发场景下redis如何保证数据一致性"
+
+判断：Q2.contains("redis") && Q1.contains("redis")
+长度差异：18（< 20）
+→ 误判为重复！实际上是不同问题
+问题3：Function Calling（工具调用）完全缺失 🔴
+原始设计
+text
+
+工具调用（Function Calling）：
+注册 searchStandardAnswer 工具，防止 AI 在技术细节上产生幻觉
+当前实现
+text
+
+❌ 完全没有实现 Function Calling
+影响
+text
+
+LLM 可能产生技术幻觉：
+- 错误的技术答案（如：Redis支持ACID事务）
+- 过时的技术知识（如：JDK 8 的特性）
+- 无法引用权威资料
+应该实现的样子
+Java
+
+// LLMService.java
+
+public class LLMService {
+    
+    /**
+     * 注册 Function Calling 工具
+     */
+    private ChatOptions buildChatOptionsWithTools() {
+        // 定义工具：搜索标准答案
+        FunctionCallback searchStandardAnswer = FunctionCallback.builder()
+            .function("searchStandardAnswer", this::searchStandardAnswer)
+            .description("搜索技术问题的标准答案，用于验证候选人回答的准确性")
+            .inputType(SearchStandardAnswerRequest.class)
+            .build();
+        
+        return ChatOptions.builder()
+            .functions(List.of(searchStandardAnswer))
+            .build();
+    }
+    
+    /**
+     * 工具实现：搜索标准答案
+     */
+    public String searchStandardAnswer(SearchStandardAnswerRequest request) {
+        // 1. 从知识库查询（可以是向量数据库、Elasticsearch等）
+        // 2. 或调用外部API（如技术文档、Stack Overflow等）
+        
+        log.info("调用工具：searchStandardAnswer, 查询: {}", request.getQuery());
+        
+        // 示例：从预定义知识库查询
+        Map<String, String> knowledgeBase = Map.of(
+            "Redis持久化", "Redis支持RDB和AOF两种持久化方式...",
+            "Spring事务传播", "Spring定义了7种事务传播行为：REQUIRED, REQUIRES_NEW..."
+        );
+        
+        return knowledgeBase.getOrDefault(request.getQuery(), "未找到相关标准答案");
+    }
+    
+    @Data
+    public static class SearchStandardAnswerRequest {
+        private String query;
+        private String category; // technical, behavioral, project
+    }
+}
+在对话中使用：
+
+Java
+
+public String generateResponse(String systemPrompt, String userMessage, List<String> history) {
+    Prompt prompt = new Prompt(
+        messages,
+        buildChatOptionsWithTools()  // ✅ 附带工具
+    );
+    
+    ChatResponse response = chatClient.call(prompt);
+    
+    // LLM 可能会调用 searchStandardAnswer 工具
+    // Spring AI 会自动处理工具调用
+    
+    return response.getResult().getOutput().getContent();
+}
+问题4：意图检测使用 LLM 而非轻量级模型 🟡
+原始设计
+text
+
+通过轻量级模型或规则判定输入是否为"回答题目"
+当前实现
+Java
+
+// IntentDetectionService.java
+public IntentResult detectIntent(String userInput, String currentStage) {
+    String prompt = buildIntentDetectionPrompt(userInput, currentStage);
+    
+    // ❌ 调用 LLM（不够轻量）
+    String result = llmService.generateResponse(prompt, "", new ArrayList<>());
+    
+    return parseIntentResult(result);
+}
+问题
+性能开销大：每次用户输入都调用 LLM
+Token 消耗：增加成本
+延迟高：影响用户体验
+改进方案：使用规则 + 轻量级模型
+Java
+
+@Service
+public class IntentDetectionService {
+    
+    /**
+     * 轻量级意图检测（规则优先，LLM兜底）
+     */
+    public IntentResult detectIntent(String userInput, String currentStage) {
+        
+        // 1️⃣ 规则匹配（最快，0 Token）
+        IntentResult ruleResult = detectByRules(userInput);
+        if (ruleResult != null) {
+            log.debug("规则匹配到意图: {}", ruleResult.getIntentType());
+            return ruleResult;
+        }
+        
+        // 2️⃣ 关键词匹配
+        IntentResult keywordResult = detectByKeywords(userInput, currentStage);
+        if (keywordResult != null) {
+            log.debug("关键词匹配到意图: {}", keywordResult.getIntentType());
+            return keywordResult;
+        }
+        
+        // 3️⃣ LLM 兜底（只在必要时调用）
+        log.debug("使用 LLM 进行意图检测");
+        return detectByLLM(userInput, currentStage);
+    }
+    
+    /**
+     * 规则匹配
+     */
+    private IntentResult detectByRules(String userInput) {
+        String normalized = userInput.toLowerCase().trim();
+        
+        // 薪资问题
+        if (normalized.matches(".*(薪资|工资|薪水|待遇|年薪|月薪|offer).*")) {
+            return new IntentResult(
+                IntentType.COMPENSATION_QUESTION,
+                "检测到薪资相关问题",
+                false,
+                "薪资相关问题我们会在后续阶段讨论，现在先聊聊技术方面的内容。"
+            );
+        }
+        
+        // 明确结束
+        if (normalized.matches(".*(结束|不面|不想面|到此为止).*")) {
+            return new IntentResult(
+                IntentType.END_INTERVIEW,
+                "用户明确要求结束",
+                false,
+                null
+            );
+        }
+        
+        // 攻击性言论
+        if (normalized.matches(".*(傻|垃圾|智障|cnm|sb).*")) {
+            return new IntentResult(
+                IntentType.OFF_TOPIC,
+                "检测到不当言论",
+                true,
+                "让我们保持专业，继续技术讨论。"
+            );
+        }
+        
+        return null; // 未匹配到规则
+    }
+    
+    /**
+     * 关键词匹配
+     */
+    private IntentResult detectByKeywords(String userInput, String currentStage) {
+        // 在 OPENING 阶段，包含"我"、"毕业"、"项目"等关键词
+        if ("OPENING".equals(currentStage)) {
+            if (userInput.matches(".*(我|我的|我是|我叫|我来自|我学|我做|项目|毕业).*")) {
+                return new IntentResult(
+                    IntentType.VALID_TECHNICAL_QUESTION,
+                    "OPENING阶段的自我介绍",
+                    true,
+                    null
+                );
+            }
+        }
+        
+        return null;
+    }
+    
+    /**
+     * LLM 检测（兜底）
+     */
+    private IntentResult detectByLLM(String userInput, String currentStage) {
+        String prompt = buildIntentDetectionPrompt(userInput, currentStage);
+        String result = llmService.generateResponse(prompt, "", new ArrayList<>());
+        return parseIntentResult(result);
+    }
+}
+📋 修复优先级清单
+🔴 P0 - 必须立即修复
+实现滑动窗口的短期记忆
+
+修改 RedisMemoryService.addMessage()
+使用 Lua 脚本或 Pipeline 实现 RPUSH + LTRIM
+修复防复读机制
+
+buildCompletePrompt：从5个改为15-20个
+buildRegeneratePrompt：显示所有已问问题
+isQuestionDuplicate：使用 Jaccard 相似度
+修复兜底问题可能重复的问题
+
+getFallbackQuestion 增加去重检查
+🟡 P1 - 重要优化
+优化意图检测性能
+
+实现规则优先的轻量级检测
+LLM 仅作为兜底
+实现 Function Calling
+
+注册 searchStandardAnswer 工具
+防止技术幻觉
+🟢 P2 - 可选增强
+增加监控和日志
+记录滑动窗口状态
+记录重复问题告警
+记录工具调用情况
+🎯 总结
+当前实现与设计的符合度：70%
+已实现：
+
+✅ 意图检测模块（但不够轻量）
+✅ 双路记忆结构（但缺少滑动窗口）
+✅ SSE 流式对话
+✅ 状态机校验
+✅ 结构化解析
+✅ 基础防复读（但有 bug）
+缺失/有问题：
+
+🔴 短期记忆无滑动窗口（严重偏差）
+🔴 防复读机制有 bug（严重偏差）
+🔴 Function Calling 完全缺失（严重偏差）
+🟡 意图检测不够轻量（中等偏差）
+修复后预期符合度：95%
+
+建议按优先级依次修复，其中滑动窗口和防复读机制是导致当前"第3-4轮重复问题"的直接原因，必须优先处理！

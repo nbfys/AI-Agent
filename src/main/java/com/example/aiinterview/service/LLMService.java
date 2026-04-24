@@ -98,19 +98,24 @@ public class LLMService {
     }
 
     /**
-     * 构建 Spring AI 消息列表
+     * 构建双路上下文消息（近期记忆 + 核心记忆）
      */
-    private List<Message> buildMessages(
-            String systemPrompt,
-            String userMessage,
-            List<String> history) {
+    public List<Message> buildDualContextMessages(String baseSystemPrompt, String userMessage, 
+                                                   List<String> history, String candidateProfile) {
 
         List<Message> messages = new ArrayList<>();
 
-        // 1. System Prompt（永久保留，永不裁剪）
-        messages.add(new SystemMessage(systemPrompt));
+        // 1. 构建完整的System Prompt
+        StringBuilder fullSystemPrompt = new StringBuilder(baseSystemPrompt);
+        
+        // 添加候选人核心信息（核心记忆）
+        if (candidateProfile != null && !candidateProfile.isEmpty()) {
+            fullSystemPrompt.append("\n\n").append(candidateProfile);
+        }
 
-        // 2. 历史记录（滑动窗口，最近 10 条）
+        messages.add(new SystemMessage(fullSystemPrompt.toString()));
+
+        // 2. 历史记录（滑动窗口，最近10条 - 近期记忆）
         List<String> trimmedHistory = trimHistory(history, 10);
         for (String msg : trimmedHistory) {
             if (msg.startsWith("用户：")) {
@@ -126,6 +131,13 @@ public class LLMService {
         }
 
         return messages;
+    }
+
+    /**
+     * 构建Spring AI消息列表（兼容旧接口）
+     */
+    private List<Message> buildMessages(String systemPrompt, String userMessage, List<String> history) {
+        return buildDualContextMessages(systemPrompt, userMessage, history, null);
     }
 
     /**
@@ -201,12 +213,22 @@ public class LLMService {
         defaultScores.put("tradeoff",   5);
         defaultScores.put("retrospect", 5);
 
+        // 随机选择一个默认问题，避免总是重复
+        List<String> defaultQuestions = List.of(
+            "请继续阐述您的想法",
+            "能否提供更多细节？",
+            "还有什么想补充的吗？",
+            "请展开说明一下",
+            "您能解释一下吗？"
+        );
+        String randomQuestion = defaultQuestions.get((int) (System.currentTimeMillis() % defaultQuestions.size()));
+
         return new InterviewResponse(
-            List.of("正在分析您的回答", "请继续"),
-            "请问您能详细介绍一下您在这个项目中承担的具体职责吗？",
+            List.of("感谢您的回答", "请继续"),
+            randomQuestion,
             "PROJECT",
             false,
-            List.of("项目经验"),
+            List.of("追问"),
             defaultScores
         );
     }
