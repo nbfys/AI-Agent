@@ -1,121 +1,115 @@
 package com.example.aiinterview.service;
 
+import com.example.aiinterview.service.client.ChatClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.ai.chat.client.ChatClient;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.prompt.Prompt;
-
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
 
-import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
 public class LLMService {
 
-    // 直接注入 Spring AI 的 ChatClient，无需手写 HTTP
-    private final ChatClient chatClient;
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
-    @Value("${spring.ai.dashscope.api-key:}")
-    private String apiKey;
+    @Autowired
+    private ChatClient chatClient;
 
     @Value("classpath:prompts/interviewer.md")
     private Resource interviewerPromptResource;
 
-    // 通过构造器注入 ChatClient.Builder（Spring AI 标准用法）
-    public LLMService(ChatClient.Builder chatClientBuilder) {
-        this.chatClient = chatClientBuilder.build();
-        this.objectMapper = new ObjectMapper();
-    }
-
-    // 启动自检：检查 API Key 是否配置
     @PostConstruct
     public void validateConfig() {
-        if (apiKey == null || apiKey.isBlank()) {
-            throw new IllegalArgumentException("DashScope API Key 未配置，请在环境变量 DASHSCOPE_API_KEY 中设置");
-        }
-        System.out.println("[LLMService] LLM 服务启动成功，使用 DashScope 模型。");
+        System.out.println("[LLMService] LLM 服务启动成功，已注入 ChatClient: " + chatClient.getClass().getSimpleName());
     }
 
     /**
-     * 普通同步调用（用于 /evaluate 评估报告等非流式场景）
+     * 同步生成回答
      */
     public String generateResponse(
             String systemPrompt,
             String userMessage,
             List<String> history) {
 
-        // 构建完整消息列表
-        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
-
-        try {
-            // Spring AI 标准调用，内部自动处理 DashScope 协议
-            return chatClient
-                    .prompt(new Prompt(messages))
-                    .call()
-                    .content();
-
-        } catch (Exception e) {
-            // 区分运行时错误（不是配置错误），抛出业务异常让 Controller 处理
-            throw new RuntimeException("LLM 调用失败：" + e.getMessage(), e);
-        }
+        List<Map<String, String>> messages = buildApiMessages(systemPrompt, userMessage, history);
+        return chatClient.chat(messages);
     }
 
     /**
-     * 流式调用（用于 /chat/stream SSE 场景）
+     * 流式生成回答
      */
-    public Flux<String> generateStream(
+    public void generateStream(
             String systemPrompt,
             String userMessage,
-            List<String> history) {
+            List<String> history,
+            java.util.concurrent.BlockingQueue<String> queue) {
 
-        List<Message> messages = buildMessages(systemPrompt, userMessage, history);
-
-        try {
-            // Spring AI 流式调用，返回 Flux<String>
-            return chatClient
-                    .prompt(new Prompt(messages))
-                    .stream()
-                    .content();
-
-        } catch (Exception e) {
-            return Flux.error(new RuntimeException("LLM 流式调用失败：" + e.getMessage(), e));
-        }
+        List<Map<String, String>> messagesList = buildApiMessages(systemPrompt, userMessage, history);
+        chatClient.stream(messagesList, queue);
     }
 
     /**
-     * 构建双路上下文消息（近期记忆 + 核心记忆）
+     * 构建 API 请求的消息列表（system prompt + 历史 + 当前问题）
      */
-    public List<Message> buildDualContextMessages(String baseSystemPrompt, String userMessage, 
-                                                   List<String> history, String candidateProfile) {
+    private List<Map<String, String>> buildApiMessages(String systemPrompt, String userMessage, List<String> history) {
+        List<Map<String, String>> messages = new ArrayList<>();
 
+        Map<String, String> system = new HashMap<>();
+        system.put("role", "system");
+        system.put("content", systemPrompt);
+        messages.add(system);
+
+        List<String> trimmedHistory = trimHistory(history, 10);
+        for (String msg : trimmedHistory) {
+            Map<String, String> m = new HashMap<>();
+            if (msg.startsWith("用户：")) {
+                m.put("role", "user");
+                m.put("content", msg.substring(3));
+            } else if (msg.startsWith("AI：")) {
+                m.put("role", "assistant");
+                m.put("content", msg.substring(3));
+            } else {
+                continue;
+            }
+            messages.add(m);
+        }
+
+        if (userMessage != null && !userMessage.isBlank()) {
+            Map<String, String> user = new HashMap<>();
+            user.put("role", "user");
+            user.put("content", userMessage);
+            messages.add(user);
+        }
+
+        // 修复：只有 system 消息时（首个问题，用户还没发言），添加占位用户消息
+        // 否则 DeepSeek 等 API 在只有 system 时输出不可控
+        if (messages.size() == 1) {
+            Map<String, String> placeholder = new HashMap<>();
+            placeholder.put("role", "user");
+            placeholder.put("content", "请开始面试");
+            messages.add(placeholder);
+        }
+
+        return messages;
+    }
+
+    public List<Message> buildDualContextMessages(String baseSystemPrompt, String userMessage,
+                                                   List<String> history, String candidateProfile) {
         List<Message> messages = new ArrayList<>();
 
-        // 1. 构建完整的System Prompt
         StringBuilder fullSystemPrompt = new StringBuilder(baseSystemPrompt);
-        
-        // 添加候选人核心信息（核心记忆）
         if (candidateProfile != null && !candidateProfile.isEmpty()) {
             fullSystemPrompt.append("\n\n").append(candidateProfile);
         }
-
         messages.add(new SystemMessage(fullSystemPrompt.toString()));
 
-        // 2. 历史记录（滑动窗口，最近10条 - 近期记忆）
         List<String> trimmedHistory = trimHistory(history, 10);
         for (String msg : trimmedHistory) {
             if (msg.startsWith("用户：")) {
@@ -125,7 +119,6 @@ public class LLMService {
             }
         }
 
-        // 3. 本轮用户消息
         if (userMessage != null && !userMessage.isBlank()) {
             messages.add(new UserMessage(userMessage));
         }
@@ -133,60 +126,42 @@ public class LLMService {
         return messages;
     }
 
-    /**
-     * 构建Spring AI消息列表（兼容旧接口）
-     */
-    private List<Message> buildMessages(String systemPrompt, String userMessage, List<String> history) {
-        return buildDualContextMessages(systemPrompt, userMessage, history, null);
-    }
-
-    /**
-     * 滑动窗口裁剪：只保留最近 maxCount 条历史
-     */
     private List<String> trimHistory(List<String> history, int maxCount) {
         if (history == null || history.isEmpty()) return new ArrayList<>();
-        
-        // 加日志确认顺序已正确
-        System.out.println("[DEBUG] history 总条数：" + history.size());
-        System.out.println("[DEBUG] history[0]：" + 
-            history.get(0).substring(0, Math.min(30, history.get(0).length())));
-        System.out.println("[DEBUG] history[last]：" + 
-            history.get(history.size()-1).substring(0, Math.min(30, history.get(history.size()-1).length())));
-        
-        // rightPush 修复后，history 已是正序（旧→新）
-        // 取末尾 maxCount 条 = 最近的对话，顺序正确
         int start = Math.max(0, history.size() - maxCount);
         return new ArrayList<>(history.subList(start, history.size()));
     }
 
-    /**
-     * 解析 LLM 结构化输出（提取末尾 JSON 块）
-     */
-    public InterviewResponse parseStructuredOutput(String rawResponse) {
+    public InterviewResponse parseStructuredOutput(String rawResponse, String currentStage) {
         try {
-            // 提取最后一个完整 JSON 块
+            // 1. 先清理 markdown 代码块标记（```json ... ```）
+            String cleaned = rawResponse.replaceAll("```[a-zA-Z]*\\s*", "").trim();
+
+            // 2. 用正则提取 JSON 对象
             Pattern pattern = Pattern.compile("\\{[\\s\\S]*\\}", Pattern.DOTALL);
-            Matcher matcher = pattern.matcher(rawResponse);
+            Matcher matcher = pattern.matcher(cleaned);
 
             String lastJson = null;
             while (matcher.find()) {
-                lastJson = matcher.group(); // 取最后匹配的 JSON
+                lastJson = matcher.group();
             }
 
             if (lastJson != null) {
                 return objectMapper.readValue(lastJson, InterviewResponse.class);
             }
+
+            System.err.println("[LLMService] 未找到 JSON 结构，原始响应前100字符: "
+                    + rawResponse.substring(0, Math.min(100, rawResponse.length())));
+
         } catch (Exception e) {
-            System.err.println("[LLMService] 结构化解析失败，使用降级默认值：" + e.getMessage());
+            System.err.println("[LLMService] 结构化解析失败 (" + e.getMessage() + ")，原始响应前100字符: "
+                    + rawResponse.substring(0, Math.min(100, rawResponse.length()))
+                    + "，使用降级默认值");
         }
 
-        // 降级：解析失败时返回安全默认值，不中断面试
-        return buildDefaultResponse();
+        return buildDefaultResponse(currentStage);
     }
 
-    /**
-     * 读取 System Prompt 文件（截取 PROMPT_START ~ PROMPT_END 之间的内容）
-     */
     public String loadSystemPrompt() throws IOException {
         String raw = new String(
             interviewerPromptResource.getInputStream().readAllBytes(),
@@ -200,12 +175,23 @@ public class LLMService {
             return raw.substring(start + "===PROMPT_START===".length(), end).strip();
         }
 
-        // 如果没有标记，返回全文（兼容旧格式）
         System.err.println("[LLMService] interviewer.md 缺少 PROMPT 边界标记，使用全文内容");
         return raw.strip();
     }
 
-    private InterviewResponse buildDefaultResponse() {
+    private InterviewResponse buildDefaultResponse(String currentStage) {
+        // 修复：OPENING 阶段降级时返回合适的开场问题
+        if ("OPENING".equals(currentStage)) {
+            return new InterviewResponse(
+                List.of("欢迎参加本次面试，请先做个自我介绍"),
+                "请先做个自我介绍，包括您的技术背景和主要经验",
+                "OPENING",
+                false,
+                List.of("开场"),
+                Map.of("clarity", 5, "depth", 5, "evidence", 5, "tradeoff", 5, "retrospect", 5)
+            );
+        }
+
         Map<String, Integer> defaultScores = new HashMap<>();
         defaultScores.put("clarity",    5);
         defaultScores.put("depth",      5);
@@ -213,7 +199,8 @@ public class LLMService {
         defaultScores.put("tradeoff",   5);
         defaultScores.put("retrospect", 5);
 
-        // 随机选择一个默认问题，避免总是重复
+        String actualStage = (currentStage != null) ? currentStage : "PROJECT";
+
         List<String> defaultQuestions = List.of(
             "请继续阐述您的想法",
             "能否提供更多细节？",
@@ -226,16 +213,13 @@ public class LLMService {
         return new InterviewResponse(
             List.of("感谢您的回答", "请继续"),
             randomQuestion,
-            "PROJECT",
+            actualStage,
             false,
             List.of("追问"),
             defaultScores
         );
     }
 
-    // ============================================================
-    // InterviewResponse DTO（使用 Jackson 注解，支持直接反序列化）
-    // ============================================================
     public static class InterviewResponse {
         @com.fasterxml.jackson.annotation.JsonProperty("feedback")
         private List<String> feedback;
@@ -255,7 +239,6 @@ public class LLMService {
         @com.fasterxml.jackson.annotation.JsonProperty("scores")
         private Map<String, Integer> scores;
 
-        // 无参构造（Jackson 反序列化必须）
         public InterviewResponse() {}
 
         public InterviewResponse(
@@ -276,5 +259,32 @@ public class LLMService {
         public boolean isShouldMoveStage()       { return shouldMoveStage; }
         public List<String> getQuestionTags()    { return questionTags; }
         public Map<String, Integer> getScores()  { return scores; }
+    }
+
+    // Message types
+    public interface Message {
+        String getRole();
+        String getContent();
+    }
+
+    public static class SystemMessage implements Message {
+        private final String content;
+        public SystemMessage(String content) { this.content = content; }
+        public String getRole() { return "system"; }
+        public String getContent() { return content; }
+    }
+
+    public static class UserMessage implements Message {
+        private final String content;
+        public UserMessage(String content) { this.content = content; }
+        public String getRole() { return "user"; }
+        public String getContent() { return content; }
+    }
+
+    public static class AssistantMessage implements Message {
+        private final String content;
+        public AssistantMessage(String content) { this.content = content; }
+        public String getRole() { return "assistant"; }
+        public String getContent() { return content; }
     }
 }

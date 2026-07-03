@@ -5,6 +5,8 @@ import com.example.aiinterview.config.InterviewConfig;
 import com.example.aiinterview.service.IntentDetectionService;
 import com.example.aiinterview.service.InterviewStateService;
 import com.example.aiinterview.service.LLMService;
+import com.example.aiinterview.entity.InterviewSession;
+import com.example.aiinterview.service.InterviewSessionService;
 import com.example.aiinterview.service.MetadataExtractionService;
 import com.example.aiinterview.service.RedisMemoryService;
 import com.example.aiinterview.util.PdfUtil;
@@ -52,6 +54,9 @@ public class InterviewController {
     @Resource
     private InterviewConfig interviewConfig;
 
+    @Resource
+    private InterviewSessionService interviewSessionService;
+
     private static final List<String> STAGES = Arrays.asList(
             "OPENING", "MOTIVATION", "PROJECT", "BACKEND", "LLM_RAG", "BEHAVIOR", "CLOSEOUT"
     );
@@ -78,6 +83,10 @@ public class InterviewController {
             String resumeContent = PdfUtil.extractText(inputStream);
             String sessionId = UUID.randomUUID().toString();
 
+            // 简历/JD 规则清洗，移除潜在注入内容
+            jdContent = intentDetectionService.sanitizeContent(jdContent);
+            resumeContent = intentDetectionService.sanitizeContent(resumeContent);
+
             redisMemoryService.cacheJdContent(sessionId, jdContent);
             redisMemoryService.cacheResumeContent(sessionId, resumeContent);
 
@@ -90,6 +99,16 @@ public class InterviewController {
 
             redisMemoryService.cacheSystemPrompt(sessionId, systemPrompt.toString());
             interviewStateService.initState(sessionId);
+
+            // 持久化到MySQL
+            InterviewSession dbSession = new InterviewSession();
+            dbSession.setSessionId(sessionId);
+            dbSession.setJdContent(jdContent);
+            dbSession.setResumeContent(resumeContent);
+            dbSession.setStatus("IN_PROGRESS");
+            dbSession.setCreateTime(java.time.LocalDateTime.now());
+            dbSession.setExpireTime(java.time.LocalDateTime.now().plusDays(30));
+            interviewSessionService.insert(dbSession);
 
             Map<String, Object> result = new HashMap<>();
             result.put("sessionId", sessionId);
@@ -211,6 +230,22 @@ public class InterviewController {
             String intentHandlingResponse = null;
             boolean shouldContinueStage = true;
 
+            // 待确认结束状态：如果用户回复确认，直接结束
+            boolean isPendingEndConfirm = "true".equals(state.get("pendingEndConfirm"));
+            if (isPendingEndConfirm && userMessage != null && !userMessage.isEmpty()) {
+                String trimmed = userMessage.trim();
+                if (trimmed.equals("确认") || trimmed.equals("是的") || trimmed.equals("嗯") || trimmed.equals("好")
+                        || trimmed.contains("确认结束") || trimmed.contains("结束面试") || trimmed.contains("不面了")) {
+                    interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
+                    emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
+                    emitter.send(SseEmitter.event().name("end").data("面试结束"));
+                    emitter.complete();
+                    return;
+                }
+                // 用户否认结束，清除标志继续面试
+                interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
+            }
+
             if (userMessage != null && !userMessage.isEmpty()) {
                 IntentDetectionService.IntentResult intentResult =
                         intentDetectionService.detectIntent(userMessage, currentStage);
@@ -218,32 +253,44 @@ public class InterviewController {
                 log.debug("意图检测结果，sessionId: {}, intent: {}", sessionId, intentResult.getIntentType());
 
                 if (intentResult.getIntentType() == IntentDetectionService.IntentType.COMPENSATION_QUESTION ||
-                        intentResult.getIntentType() == IntentDetectionService.IntentType.OFF_TOPIC) {
+                        intentResult.getIntentType() == IntentDetectionService.IntentType.OFF_TOPIC ||
+                        intentResult.getIntentType() == IntentDetectionService.IntentType.SYSTEM_ISSUE ||
+                        intentResult.getIntentType() == IntentDetectionService.IntentType.INJECTION_ATTEMPT) {
                     shouldUseIntentHandling = true;
                     intentHandlingResponse = intentResult.getSuggestedResponse();
                     shouldContinueStage = intentResult.isShouldContinueStage();
                 } else if (intentResult.getIntentType() == IntentDetectionService.IntentType.END_INTERVIEW) {
-                    // 更谨慎的结束判断：只有用户明确说"结束"、"结束面试"、"不面了"才真的结束
-                    String lowerMessage = userMessage.trim().toLowerCase();
-                    boolean reallyEnd = lowerMessage.contains("结束") || lowerMessage.contains("不面") || 
-                                      lowerMessage.contains("不面试") || lowerMessage.contains("结束面试") || 
-                                      lowerMessage.contains("到此结束");
-                    
-                    if (shouldEndInterview((String) state.get("stage"), 
-                                          (int) state.getOrDefault("stageTurnCount", 0), 
-                                          totalTurns, reallyEnd)) {
+                    boolean isPendingConfirm = "true".equals(state.get("pendingEndConfirm"));
+                    if (isPendingConfirm) {
+                        // 用户已确认结束 → 直接结束面试
+                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
                         emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
                         emitter.send(SseEmitter.event().name("end").data("面试结束"));
                         emitter.complete();
                         return;
-                    } else if (reallyEnd) {
-                        // 面试刚开始，不要直接结束，让面试官确认一下
+                    }
+
+                    boolean canEnd = shouldEndInterview(
+                            (String) state.get("stage"),
+                            (int) state.getOrDefault("stageTurnCount", 0),
+                            totalTurns, true);
+
+                    if (canEnd) {
+                        emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
+                        emitter.send(SseEmitter.event().name("end").data("面试结束"));
+                        emitter.complete();
+                        return;
+                    } else {
                         shouldUseIntentHandling = true;
                         intentHandlingResponse = "您确定要结束面试吗？我们还可以继续聊聊其他方面的问题。如果您确实想要结束，请再次确认。";
                         shouldContinueStage = true;
-                    } else {
-                        // 只是"没了"、"好了"这类不算结束，当作正常回答
-                        log.debug("用户说'没了'等，但不是结束意图，继续正常流程");
+                        // 标记待确认状态
+                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "true"));
+                    }
+                } else {
+                    // 非END意图时，清除待确认状态
+                    if ("true".equals(state.get("pendingEndConfirm"))) {
+                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
                     }
                 }
             }
@@ -341,20 +388,67 @@ public class InterviewController {
         newState.put("totalTurns", updatedTotalTurns);
         interviewStateService.updateState(sessionId, newState);
 
-        sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns, null, new ArrayList<>());
+        sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns, null, new ArrayList<>(), intentHandlingResponse);
         checkAndSendEndSignal(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns);
+
+        // 持久化：更新MySQL会话状态 + 异步保存对话历史
+        List<String> history = redisMemoryService.getHistory(sessionId);
+        interviewSessionService.updateBySessionId(sessionId, "IN_PROGRESS", null);
+        interviewSessionService.asyncSaveHistory(sessionId, history);
+
         emitter.complete();
     }
 
     private void handleNormalResponse(String sessionId, SseEmitter emitter, String completePrompt,
                                        String userMessage, List<String> history, String currentStage,
                                        int stageTurnCount, int totalTurns) throws Exception {
-        log.debug("开始调用LLM服务，sessionId: {}", sessionId);
-        String fullAiResponse = llmService.generateResponse(completePrompt, userMessage, history);
-        log.debug("LLM调用成功，响应长度: {}", fullAiResponse.length());
+        log.debug("开始流式调用LLM服务，sessionId: {}", sessionId);
+
+        // BlockingQueue 容量1：生产一个消费一个，实现天然背压
+        java.util.concurrent.BlockingQueue<String> queue = new java.util.concurrent.ArrayBlockingQueue<>(1);
+
+        // 在后台线程运行LLM流式请求
+        java.util.concurrent.CompletableFuture.runAsync(() ->
+                llmService.generateStream(completePrompt, userMessage, history, queue),
+                sseExecutor
+        );
+
+        // 后台线程逐个读取并缓冲（不推送到前端，等完整结果后只显示问题）
+        StringBuilder fullBuffer = new StringBuilder();
+        try {
+            while (true) {
+                String chunk = queue.take();
+                if ("__DONE__".equals(chunk)) break;
+                if (chunk.startsWith("__ERROR__:")) {
+                    throw new RuntimeException(chunk.substring(9));
+                }
+                if (chunk.isEmpty()) continue;
+                fullBuffer.append(chunk);
+            }
+        } catch (Exception e) {
+            log.error("LLM流式调用异常，sessionId: {}", sessionId, e);
+        }
+
+        String fullAiResponse = fullBuffer.toString();
+        log.debug("LLM流式调用成功，响应长度: {}", fullAiResponse.length());
+
+        // LLM输出后置自检：检测到异常内容则替换为兜底问题
+        boolean outputSafe = intentDetectionService.checkOutput(fullAiResponse);
+        if (!outputSafe) {
+            log.warn("LLM输出包含异常内容，已拦截替换为兜底问题，sessionId: {}", sessionId);
+            fullAiResponse = getFallbackQuestion(currentStage);
+        }
 
         StringBuilder fullResponse = new StringBuilder(fullAiResponse);
-        LLMService.InterviewResponse interviewResponse = llmService.parseStructuredOutput(fullResponse.toString());
+        LLMService.InterviewResponse interviewResponse;
+
+        if (!outputSafe) {
+            interviewResponse = new LLMService.InterviewResponse(
+                    java.util.List.of("请继续回答"), fullAiResponse, currentStage, false,
+                    java.util.List.of("综合"), null);
+        } else {
+            interviewResponse = llmService.parseStructuredOutput(fullResponse.toString(), currentStage);
+        }
 
         String originalQuestion = interviewResponse.getNextQuestion();
         Set<Object> existingQuestions = redisMemoryService.getAskedQuestions(sessionId);
@@ -384,7 +478,7 @@ public class InterviewController {
                     );
                     
                     String newResponse = llmService.generateResponse(regeneratePrompt.toString(), userMessage, history);
-                    LLMService.InterviewResponse newInterviewResponse = llmService.parseStructuredOutput(newResponse);
+                    LLMService.InterviewResponse newInterviewResponse = llmService.parseStructuredOutput(newResponse, currentStage);
                     String newQuestion = newInterviewResponse.getNextQuestion();
                     
                     // 检查新问题是否还重复
@@ -432,20 +526,20 @@ public class InterviewController {
                     String fallbackJson = objectMapper.writeValueAsString(fallbackMap);
                     fullResponse = new StringBuilder(fallbackJson);
                     // 重新解析为InterviewResponse
-                    interviewResponse = llmService.parseStructuredOutput(fallbackJson);
+                    interviewResponse = llmService.parseStructuredOutput(fallbackJson, currentStage);
                 } catch (Exception e) {
                     log.error("构建兜底响应失败: {}", e.getMessage(), e);
                 }
             }
         }
 
+        ObjectMapper objectMapper = new ObjectMapper();
         String cleanAiResponse = stripJsonBlock(fullResponse.toString());
-        // 始终保留LLM返回的完整内容
         String displayContent = cleanAiResponse;
 
         log.debug("最终显示内容，sessionId: {}, content: {}", sessionId, displayContent);
 
-        emitter.send(SseEmitter.event().data(displayContent));
+        // 存储到Redis（不含JSON部分）
         redisMemoryService.addMessage(sessionId, "AI：" + displayContent);
         
         // 只有真正的技术问题才存入askedQuestions，追问话术不存
@@ -490,10 +584,29 @@ public class InterviewController {
         newState.put("totalTurns", updatedTotalTurns);
         interviewStateService.updateState(sessionId, newState);
 
+        // 流式输出最终问题（逐字推送）
+        if (finalQuestion != null && !finalQuestion.isBlank()) {
+            for (char c : finalQuestion.toCharArray()) {
+                try {
+                    emitter.send(SseEmitter.event().name("token").data(String.valueOf(c)));
+                    Thread.sleep(15); // ~66字符/秒，模拟自然书写速度
+                } catch (Exception e) {
+                    log.debug("流式输出被中断，sessionId: {}", sessionId);
+                    break;
+                }
+            }
+        }
+
         // 更新should_move_stage为实际阶段推进状态
         sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns,
-                interviewResponse.getScores(), interviewResponse.getQuestionTags());
+                interviewResponse.getScores(), interviewResponse.getQuestionTags(), finalQuestion);
         checkAndSendEndSignal(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns);
+
+        // 持久化：更新MySQL会话状态 + 异步保存对话历史
+        List<String> currentHistory = redisMemoryService.getHistory(sessionId);
+        interviewSessionService.updateBySessionId(sessionId, "IN_PROGRESS", null);
+        interviewSessionService.asyncSaveHistory(sessionId, currentHistory);
+
         log.debug("流式请求处理完成，sessionId: {}", sessionId);
         emitter.complete();
     }
@@ -535,7 +648,8 @@ public class InterviewController {
     }
 
     private void sendStatusUpdate(SseEmitter emitter, String stage, int stageTurnCount,
-                                  int totalTurns, Map<String, Integer> scores, List<String> questionTags) {
+                                  int totalTurns, Map<String, Integer> scores, List<String> questionTags,
+                                  String nextQuestion) {
         try {
             ObjectMapper objectMapper = new ObjectMapper();
             Map<String, Object> statusUpdate = new HashMap<>();
@@ -544,6 +658,7 @@ public class InterviewController {
             statusUpdate.put("totalTurns", totalTurns);
             statusUpdate.put("scores", scores);
             statusUpdate.put("questionTags", questionTags != null ? questionTags : new ArrayList<>());
+            statusUpdate.put("next_question", nextQuestion);
             String statusJson = objectMapper.writeValueAsString(statusUpdate);
             emitter.send(SseEmitter.event().name("status").data(statusJson));
         } catch (Exception e) {
@@ -591,7 +706,33 @@ public class InterviewController {
 
             Map<String, Object> state = interviewStateService.getState(sessionId);
             if (state == null || state.isEmpty()) {
-                return Result.error("会话不存在或已过期");
+                // 从MySQL恢复会话
+                InterviewSession dbSession = interviewSessionService.selectBySessionId(sessionId);
+                if (dbSession == null) {
+                    return Result.error("会话不存在或已过期");
+                }
+                // 重建Redis缓存
+                redisMemoryService.cacheJdContent(sessionId, dbSession.getJdContent());
+                redisMemoryService.cacheResumeContent(sessionId, dbSession.getResumeContent());
+                interviewStateService.initState(sessionId);
+
+                if (dbSession.getConversationHistory() != null) {
+                    try {
+                        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                        java.util.List<String> historyList = mapper.readValue(
+                            dbSession.getConversationHistory(),
+                            com.fasterxml.jackson.databind.type.TypeFactory.defaultInstance().constructCollectionType(
+                                java.util.List.class, String.class)
+                        );
+                        for (String msg : historyList) {
+                            redisMemoryService.addMessage(sessionId, msg);
+                        }
+                    } catch (Exception e) {
+                        log.warn("从MySQL恢复对话历史失败，sessionId: {}", sessionId, e);
+                    }
+                }
+
+                state = interviewStateService.getState(sessionId);
             }
 
             List<String> history = redisMemoryService.getHistory(sessionId);

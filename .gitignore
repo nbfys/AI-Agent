@@ -1,0 +1,11 @@
+target/
+.idea/
+*.iml
+node_modules/
+*.class
+*.log
+resume.pdf
+resume.txt
+历史对话*.txt
+问答.txt
+面试准备/

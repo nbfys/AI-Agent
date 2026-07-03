@@ -1,525 +1,544 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI 面试助手</title>
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Vue 3 -->
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
-    <!-- marked.js -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@11.0.0/marked.min.js"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
-        
-        body {
-            font-family: 'Noto Sans SC', sans-serif;
-        }
-        
-        .chat-container {
-            height: calc(100vh - 12rem);
-            overflow-y: auto;
-        }
-        
-        .chat-message {
-            max-width: 80%;
-            margin-bottom: 1rem;
-            padding: 1rem;
-            border-radius: 0.5rem;
-        }
-        
-        .ai-message {
-            background-color: #f3f4f6;
-            border-top-left-radius: 0;
-            align-self: flex-start;
-        }
-        
-        .user-message {
-            background-color: #3b82f6;
-            color: white;
-            border-top-right-radius: 0;
-            align-self: flex-end;
-        }
-        
-        .typing-indicator {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-        }
-        
-        .typing-dot {
-            width: 0.5rem;
-            height: 0.5rem;
-            background-color: #6b7280;
-            border-radius: 50%;
-            animation: typing 1.4s infinite ease-in-out both;
-        }
-        
-        .typing-dot:nth-child(1) {
-            animation-delay: -0.32s;
-        }
-        
-        .typing-dot:nth-child(2) {
-            animation-delay: -0.16s;
-        }
-        
-        @keyframes typing {
-            0%, 80%, 100% {
-                transform: scale(0);
-            }
-            40% {
-                transform: scale(1);
-            }
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 面试助手</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>面</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 15px; }
+    body {
+      font-family: 'Noto Sans SC', sans-serif;
+      background: #0b0e17;
+      color: #e2e8f0;
+      overflow: hidden;
+      height: 100vh;
+    }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #2a2a3e; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a52; }
+
+    .glass {
+      background: rgba(24, 24, 37, 0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(42, 42, 62, 0.5);
+    }
+    .glass-strong {
+      background: rgba(24, 24, 37, 0.92);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(42, 42, 62, 0.6);
+    }
+    .glow-border:focus-within { border-color: rgba(245,158,11,0.4); box-shadow: 0 0 0 2px rgba(245,158,11,0.1); }
+
+    .msg-enter { animation: slideUp 0.35s ease-out both; }
+    .msg-user { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #0b0e17; }
+    .msg-ai { background: linear-gradient(135deg, #1e293b 0%, #181825 100%); border: 1px solid rgba(42,42,62,0.4); }
+    .msg-system { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.2); color: #6ee7b7; }
+
+    .typing-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #f59e0b;
+      animation: bounceDot 1.4s infinite ease-in-out both;
+    }
+    .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+    .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+    @keyframes bounceDot {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+
+    .stage-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 9999px;
+      font-size: 0.75rem; font-weight: 500;
+      transition: all 0.3s ease;
+      border: 1px solid transparent;
+    }
+    .stage-active { background: rgba(245,158,11,0.15); color: #f59e0b; border-color: rgba(245,158,11,0.3); }
+    .stage-done { background: rgba(16,185,129,0.1); color: #10b981; border-color: rgba(16,185,129,0.2); }
+    .stage-wait { background: transparent; color: #64748b; border-color: #2a2a3e; }
+
+    .score-ring { transition: stroke-dashoffset 0.8s ease; }
+
+    .shimmer-bg {
+      background: linear-gradient(110deg, #181825 30%, #252540 50%, #181825 70%);
+      background-size: 200% 100%;
+      animation: shimmer 3s ease-in-out infinite;
+    }
+
+    @media (max-width: 768px) {
+      .sidebar { display: none; }
+      .sidebar.open { display: flex; position: fixed; inset: 0; z-index: 50; }
+    }
+  </style>
 </head>
-<body class="bg-gray-100">
-    <div id="app" class="flex h-screen">
-        <!-- 左侧侧边栏 -->
-        <div class="w-1/3 bg-white border-r border-gray-200 p-6">
-            <div class="flex justify-between items-center mb-6">
-                <h1 class="text-2xl font-bold text-gray-800">AI 面试助手</h1>
-                <span v-if="mode" class="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-xs font-medium">
-                    {{ mode }}
-                </span>
+<body>
+  <div id="app" class="h-screen flex flex-col">
+    <!-- ===== HEADER ===== -->
+    <header class="glass-strong shrink-0 px-5 py-3 flex items-center justify-between z-10">
+      <div class="flex items-center gap-4">
+        <h1 class="font-display text-xl tracking-wide" style="color:#f59e0b">面</h1>
+        <span class="text-sm text-slate-300 font-medium tracking-wider hidden sm:inline">AI 面试助手</span>
+        <span v-if="mode" class="ml-2 px-2.5 py-0.5 rounded text-[11px] font-mono uppercase tracking-widest" :class="isInterviewEnded ? 'bg-emerald/10 text-emerald' : 'bg-accent/10 text-accent'">{{ mode }}</span>
+      </div>
+      <div class="flex items-center gap-3 text-xs text-slate-500">
+        <template v-if="sessionId">
+          <span class="hidden md:inline font-mono">#{{ sessionId.slice(0,8) }}</span>
+          <span class="w-1.5 h-1.5 rounded-full" :class="isTyping ? 'bg-accent animate-pulse' : isInterviewEnded ? 'bg-emerald' : 'bg-slate-600'"></span>
+        </template>
+      </div>
+    </header>
+
+    <!-- ===== MAIN ===== -->
+    <div class="flex-1 flex overflow-hidden">
+
+      <!-- ===== CONFIG PANEL (pre-interview) ===== -->
+      <div v-if="phase === 'config'" class="flex-1 flex items-center justify-center p-6">
+        <div class="w-full max-w-lg">
+          <div class="text-center mb-10">
+            <div class="font-display text-6xl mb-4" style="color:#f59e0b">面</div>
+            <h2 class="text-2xl font-bold text-slate-100">模拟面试</h2>
+            <p class="text-slate-500 text-sm mt-2">上传简历与岗位描述，开始一场真实的技术面试</p>
+          </div>
+
+          <div class="glass rounded-2xl p-6 space-y-5">
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5 tracking-wider uppercase">岗位描述 JD</label>
+              <textarea v-model="jdContent"
+                class="w-full bg-[#0b0e17] border border-border rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none glow-border transition-colors resize-none"
+                placeholder="粘贴目标岗位 JD 内容..." rows="5" :disabled="isInterviewing"></textarea>
             </div>
-            
-            <div class="mb-4">
-                <label class="block text-sm font-medium text-gray-700 mb-1">目标岗位 JD</label>
-                <textarea 
-                    v-model="jdContent" 
-                    class="w-full p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder="请粘贴目标岗位 JD..."
-                    rows="6"
-                    :disabled="isInterviewing"
-                ></textarea>
+            <div>
+              <label class="block text-xs font-medium text-slate-400 mb-1.5 tracking-wider uppercase">简历 PDF</label>
+              <div @click="$refs.fileInput.click()"
+                class="w-full bg-[#0b0e17] border border-border rounded-xl px-4 py-3 text-sm text-slate-400 flex items-center gap-3 transition-colors cursor-pointer hover:border-accent/30"
+                :class="{'border-accent/40': resumeName}">
+                <svg class="w-5 h-5 shrink-0" :class="resumeName ? 'text-accent' : 'text-slate-600'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                <span>{{ resumeName || '点击选择 PDF 文件' }}</span>
+              </div>
+              <input ref="fileInput" type="file" accept=".pdf" @change="handleFileUpload" class="absolute w-0 h-0 opacity-0 -z-10">
             </div>
-            
-            <div class="mb-6">
-                <label class="block text-sm font-medium text-gray-700 mb-1">上传简历 (PDF)</label>
-                <input 
-                    type="file" 
-                    accept=".pdf" 
-                    @change="handleFileUpload"
-                    class="w-full p-3 border border-gray-300 rounded-md"
-                    :disabled="isInterviewing"
-                >
-                <p v-if="resumeName" class="text-sm text-gray-600 mt-1">{{ resumeName }}</p>
+            <div v-if="errorMessage" class="bg-red-900/30 border border-red-800/40 rounded-xl px-4 py-3 text-sm text-red-300 flex items-start gap-2">
+              <svg class="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <div class="flex-1">{{ errorMessage }}</div>
+              <button @click="errorMessage=''; isInterviewing=false" class="text-red-400 hover:text-red-200 text-xs shrink-0">重置</button>
             </div>
-            
-            <button 
-                @click="startInterview"
-                class="w-full bg-blue-500 text-white py-3 px-4 rounded-md hover:bg-blue-600 transition-colors"
-                :disabled="!jdContent || !resumeFile || isInterviewing"
-            >
-                {{ isInterviewing ? '面试中...' : '开始模拟面试' }}
+            <button @click="startInterview"
+              class="w-full py-3 rounded-xl font-medium text-sm transition-all duration-300"
+              :class="!jdContent || !resumeFile ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-accent text-[#0b0e17] hover:bg-accent-hover hover:shadow-lg hover:shadow-accent/20 active:scale-[0.98]'"
+              :disabled="!jdContent || !resumeFile || isInterviewing">
+              <span v-if="isInterviewing" class="flex items-center justify-center gap-2">
+                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                初始化中...
+              </span>
+              <span v-else>开始面试</span>
             </button>
+          </div>
+
+          <p class="text-center text-xs text-slate-600 mt-6">面试过程由 AI 驱动 · 支持多阶段技术面 · 自动生成评估报告</p>
         </div>
-        
-        <!-- 右侧主区域 -->
-        <div class="w-2/3 flex flex-col bg-gray-50">
-            <!-- 状态显示 -->
-            <div class="p-4 bg-white border-b border-gray-200">
-                <div class="flex flex-wrap gap-4 text-sm">
-                    <div>面试模式：<span class="font-medium">{{ mode || '未开始' }}</span></div>
-                    <div>会话ID：<span id="sessionId">{{ sessionId }}</span></div>
-                    <div>当前阶段：<span id="currentStage" class="font-medium">{{ currentStage || '未开始' }}</span></div>
-                    <div>阶段轮次：<span id="stageTurnCount">{{ stageTurnCount || 0 }}</span>/4</div>
-                    <div>总轮次：<span id="totalTurns">{{ totalTurns || 0 }}</span>/20</div>
+      </div>
+
+      <!-- ===== INTERVIEW LAYOUT ===== -->
+      <template v-if="phase === 'interview' || phase === 'end'">
+
+        <!-- Chat Area -->
+        <div class="flex-1 flex flex-col min-w-0">
+          <!-- Stage Banner -->
+          <div class="shrink-0 px-5 py-2.5 flex items-center gap-2 overflow-x-auto" style="background:rgba(24,24,37,0.3)">
+            <template v-for="(s, i) in stageList" :key="s">
+              <span class="stage-pill whitespace-nowrap"
+                :class="stageIndex === i ? 'stage-active' : i < stageIndex ? 'stage-done' : 'stage-wait'">
+                <svg v-if="i < stageIndex" class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+                <span v-else-if="i === stageIndex" class="w-2 h-2 rounded-full bg-accent animate-pulse"></span>
+                <span v-else class="w-2 h-2 rounded-full bg-slate-600"></span>
+                {{ stageLabels[i] || s }}
+              </span>
+              <svg v-if="i < stageList.length-1" class="w-4 h-4 shrink-0 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            </template>
+          </div>
+
+          <!-- Messages -->
+          <div ref="chatRef" class="flex-1 overflow-y-auto px-5 py-4 space-y-3 scroll-smooth">
+            <div v-for="(msg, idx) in messages" :key="msg._key"
+              class="msg-enter flex" :class="msg.type === 'user' ? 'justify-end' : 'justify-start'"
+              :style="{animationDelay: '0s'}">
+              <div class="max-w-[75%] md:max-w-[65%] rounded-2xl px-4 py-3 text-sm leading-relaxed"
+                :class="msg.type === 'user' ? 'msg-user rounded-br-md' : msg.type === 'system' ? 'msg-system' : 'msg-ai rounded-bl-md'">
+                <div class="text-[11px] font-medium tracking-wider mb-1 opacity-60"
+                  :class="msg.type === 'user' ? 'text-right' : ''">
+                  {{ msg.type === 'user' ? '你' : msg.type === 'system' ? '系统' : '面试官' }}
                 </div>
-                
-                <!-- 评分显示 -->
-                <div id="scoresContainer" class="mt-3 p-3 bg-gray-50 rounded-lg" v-if="scores">
-                    <h4 class="font-medium mb-2">评分反馈</h4>
-                    <div class="grid grid-cols-2 md:grid-cols-5 gap-2">
-                        <div class="text-center">
-                            <div class="text-xs text-gray-500">表达清晰度</div>
-                            <div id="clarityScore" class="font-medium">{{ scores.clarity || 0 }}</div>
-                        </div>
-                        <div class="text-center">
-                            <div class="text-xs text-gray-500">技术深度</div>
-                            <div id="depthScore" class="font-medium">{{ scores.depth || 0 }}</div>
-                        </div>
-                        <div class="text-center">
-                            <div class="text-xs text-gray-500">证据与量化</div>
-                            <div id="evidenceScore" class="font-medium">{{ scores.evidence || 0 }}</div>
-                        </div>
-                        <div class="text-center">
-                            <div class="text-xs text-gray-500">权衡取舍</div>
-                            <div id="tradeoffScore" class="font-medium">{{ scores.tradeoff || 0 }}</div>
-                        </div>
-                        <div class="text-center">
-                            <div class="text-xs text-gray-500">复盘改进</div>
-                            <div id="retrospectScore" class="font-medium">{{ scores.retrospect || 0 }}</div>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- 问题标签 -->
-                <div id="tagsContainer" class="mt-2" v-if="questionTags && questionTags.length > 0">
-                    <div class="flex flex-wrap gap-2">
-                        <span class="text-xs text-gray-500">问题标签：</span>
-                        <div id="questionTags" class="flex flex-wrap gap-1">
-                            <span v-for="tag in questionTags" :key="tag" class="px-2 py-1 bg-blue-100 text-blue-800 rounded-full text-xs">
-                                {{ tag }}
-                            </span>
-                        </div>
-                    </div>
-                </div>
+                <div v-html="msg.content"></div>
+              </div>
             </div>
-            
-            <!-- 聊天展示区 -->
-            <div class="chat-container flex flex-col p-6 space-y-4">
-                <div 
-                    v-for="(message, index) in messages" 
-                    :key="index"
-                    class="chat-message" 
-                    :class="message.type === 'ai' ? 'ai-message' : 'user-message'"
-                >
-                    <div v-if="message.type === 'ai'" class="text-sm text-gray-500 mb-1">面试官</div>
-                    <div v-else class="text-sm text-gray-300 mb-1">你</div>
-                    <div v-html="message.content"></div>
+
+            <!-- Typing -->
+            <div v-if="isTyping" class="flex justify-start msg-enter">
+              <div class="msg-ai rounded-2xl rounded-bl-md px-5 py-4">
+                <div class="flex items-center gap-2.5">
+                  <div class="typing-dot"></div>
+                  <div class="typing-dot"></div>
+                  <div class="typing-dot"></div>
                 </div>
-                
-                <!-- 打字指示器 -->
-                <div v-if="isTyping" class="chat-message ai-message">
-                    <div class="text-sm text-gray-500 mb-1">面试官</div>
-                    <div class="typing-indicator">
-                        <div class="typing-dot"></div>
-                        <div class="typing-dot"></div>
-                        <div class="typing-dot"></div>
-                    </div>
-                </div>
-                
-                <!-- 错误提示 -->
-                <div v-if="errorMessage" class="chat-message bg-red-100 text-red-800">
-                    <div class="text-sm font-medium mb-1">错误</div>
-                    <div>{{ errorMessage }}</div>
-                </div>
-                
-                <!-- 面试结束提示 -->
-                <div v-if="isInterviewEnded" class="chat-message bg-green-100 text-green-800">
-                    <div class="text-sm font-medium mb-1">面试结束</div>
-                    <div>面试已结束，点击下方按钮查看评估报告。</div>
-                </div>
+              </div>
             </div>
-            
-            <!-- 用户输入区 -->
-            <div class="p-6 border-t border-gray-200">
-                <div class="flex space-x-2">
-                    <textarea 
-                        v-model="userInput" 
-                        class="flex-1 p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="请输入你的回答..."
-                        rows="3"
-                        :disabled="!sessionId || isInterviewEnded"
-                    ></textarea>
-                    <button 
-                        @click="sendMessage"
-                        class="bg-blue-500 text-white py-3 px-6 rounded-md hover:bg-blue-600 transition-colors"
-                        :disabled="!sessionId || !userInput.trim() || isInterviewEnded"
-                    >
-                        发送
-                    </button>
-                </div>
-                <div class="mt-4 flex justify-end">
-                    <button 
-                        @click="endInterview"
-                        class="bg-gray-500 text-white py-2 px-4 rounded-md hover:bg-gray-600 transition-colors"
-                        :disabled="!sessionId"
-                    >
-                        结束面试
-                    </button>
-                </div>
+
+            <!-- Error -->
+            <div v-if="errorMessage" class="flex justify-center msg-enter">
+              <div class="bg-red-900/30 border border-red-800/40 rounded-xl px-4 py-2.5 text-sm text-red-300 flex items-center gap-2">
+                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                {{ errorMessage }}
+              </div>
             </div>
+
+            <!-- End -->
+            <div v-if="isInterviewEnded && !isTyping" class="flex justify-center msg-enter">
+              <div class="bg-emerald/10 border border-emerald/20 rounded-xl px-5 py-3 text-sm text-emerald text-center">
+                <div class="font-medium mb-1">面试已结束</div>
+                <div class="text-emerald/70 text-xs">点击下方按钮查看完整评估报告</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Input -->
+          <div class="shrink-0 px-4 py-3" style="background:rgba(11,14,23,0.8)">
+            <div class="flex items-end gap-2 max-w-4xl mx-auto">
+              <div class="flex-1 relative glow-border rounded-xl transition-colors" :class="isInterviewEnded || !sessionId ? 'opacity-50' : ''">
+                <textarea v-model="userInput" @keydown.enter.ctrl="sendMessage" :disabled="!sessionId || isInterviewEnded"
+                  class="w-full bg-[#0b0e17] border border-border rounded-xl pl-4 pr-10 py-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none resize-none"
+                  placeholder="输入你的回答… (Ctrl+Enter 发送)" rows="2"></textarea>
+                <button @click="sendMessage" :disabled="!sessionId || !userInput.trim() || isInterviewEnded"
+                  class="absolute right-2 bottom-2 w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-200"
+                  :class="!userInput.trim() ? 'text-slate-700' : 'bg-accent text-[#0b0e17] hover:bg-accent-hover active:scale-90'">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </button>
+              </div>
+              <button @click="endInterview" :disabled="!sessionId || isInterviewEnded"
+                class="px-3 py-3 rounded-xl border text-xs font-medium transition-all duration-200"
+                :class="isInterviewEnded ? 'border-border text-slate-600' : 'border-border hover:border-red-800/40 text-slate-400 hover:text-red-300 hover:bg-red-900/10'">
+                <span class="hidden sm:inline">结束</span>
+                <svg class="w-4 h-4 sm:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+            </div>
+          </div>
         </div>
+
+        <!-- ===== SIDEBAR ===== -->
+        <aside class="sidebar w-72 shrink-0 border-l border-border flex flex-col overflow-y-auto" style="background:rgba(24,24,37,0.4)">
+          <!-- Stage Progress -->
+          <div class="p-4 border-b border-border">
+            <div class="text-[11px] font-medium tracking-wider text-slate-500 uppercase mb-3">面试进度</div>
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-xs text-slate-400">轮次</span>
+              <span class="text-xs font-mono text-slate-300">{{ totalTurns }} / 20</span>
+            </div>
+            <div class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div class="h-full rounded-full transition-all duration-500 ease-out" :style="{width: Math.min(totalTurns/20*100, 100)+'%', background: 'linear-gradient(90deg, #f59e0b, #fbbf24)'}"></div>
+            </div>
+            <div class="flex items-center justify-between mt-3">
+              <span class="text-xs text-slate-400">阶段</span>
+              <span class="text-xs font-mono text-slate-300">{{ stageTurnCount }} / 4</span>
+            </div>
+            <div class="w-full h-1 rounded-full bg-slate-800 overflow-hidden">
+              <div class="h-full rounded-full transition-all duration-500 ease-out" :style="{width: Math.min(stageTurnCount/4*100, 100)+'%', background: 'linear-gradient(90deg, #10b981, #34d399)'}"></div>
+            </div>
+          </div>
+
+          <!-- Scores -->
+          <div class="p-4 border-b border-border" v-if="scores">
+            <div class="text-[11px] font-medium tracking-wider text-slate-500 uppercase mb-3">评分</div>
+            <div class="space-y-2.5">
+              <div v-for="s in scoreDefs" :key="s.key" class="flex items-center gap-2">
+                <span class="text-xs text-slate-400 w-16 shrink-0">{{ s.label }}</span>
+                <div class="flex-1 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div class="h-full rounded-full transition-all duration-700 ease-out"
+                    :style="{width: ((scores[s.key]||0)/10*100)+'%', background: scoreColor(scores[s.key])}"></div>
+                </div>
+                <span class="text-xs font-mono w-5 text-right" :class="scoreTextColor(scores[s.key])">{{ scores[s.key] || 0 }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tags -->
+          <div class="p-4 border-b border-border" v-if="questionTags && questionTags.length">
+            <div class="text-[11px] font-medium tracking-wider text-slate-500 uppercase mb-3">能力标签</div>
+            <div class="flex flex-wrap gap-1.5">
+              <span v-for="tag in questionTags" :key="tag"
+                class="px-2.5 py-1 rounded-full text-[11px] font-medium"
+                :style="{background: 'rgba(245,158,11,0.1)', color: '#fbbf24', border: '1px solid rgba(245,158,11,0.2)'}">
+                {{ tag }}
+              </span>
+            </div>
+          </div>
+
+          <!-- JD Resume (collapsible) -->
+          <div class="p-4 border-b border-border">
+            <button @click="showContext = !showContext" class="flex items-center justify-between w-full text-[11px] font-medium tracking-wider text-slate-500 uppercase">
+              <span>面试上下文</span>
+              <svg class="w-3.5 h-3.5 transition-transform" :class="showContext ? 'rotate-180' : ''" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+            </button>
+            <div v-show="showContext" class="mt-2 space-y-2">
+              <div class="text-xs text-slate-400 bg-[#0b0e17] rounded-lg p-2.5 max-h-24 overflow-y-auto">
+                <div class="text-[10px] text-slate-600 font-medium mb-1">JD</div>
+                <div class="leading-relaxed">{{ jdContent?.slice(0,200) }}{{ jdContent?.length > 200 ? '…' : '' }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- End Interview Button -->
+          <div class="p-4 mt-auto" v-if="!isInterviewEnded">
+            <button @click="endInterview"
+              class="w-full py-2 rounded-lg border border-border text-xs text-slate-400 hover:text-red-300 hover:border-red-800/40 hover:bg-red-900/5 transition-all duration-200">
+              结束当前面试
+            </button>
+          </div>
+          <div class="p-4 mt-auto" v-if="isInterviewEnded">
+            <button @click="evaluateInterview"
+              class="w-full py-2.5 rounded-xl text-xs font-medium transition-all duration-200 bg-accent text-[#0b0e17] hover:bg-accent-hover active:scale-[0.98]">
+              查看评估报告
+            </button>
+          </div>
+        </aside>
+
+      </template>
     </div>
-    
-    <script>
-        const { createApp } = Vue;
-        
-        createApp({
-            data() {
-                return {
-                    jdContent: '',
-                    resumeFile: null,
-                    resumeName: '',
-                    sessionId: null,
-                    mode: null,
-                    isInterviewing: false,
-                    isInterviewEnded: false,
-                    messages: [],
-                    userInput: '',
-                    isTyping: false,
-                    errorMessage: '',
-                    eventSource: null,
-                    currentStage: null,
-                    stageTurnCount: 0,
-                    totalTurns: 0,
-                    scores: null,
-                    questionTags: []
-                };
-            },
-            methods: {
-                handleFileUpload(e) {
-                    this.resumeFile = e.target.files[0];
-                    if (this.resumeFile) {
-                        this.resumeName = this.resumeFile.name;
-                    } else {
-                        this.resumeName = '';
-                    }
-                },
-                
-                async startInterview() {
-                    if (!this.jdContent || !this.resumeFile) return;
-                    
-                    this.isInterviewing = true;
-                    this.errorMessage = '';
-                    
-                    // 创建 FormData
-                    const formData = new FormData();
-                    formData.append('resume', this.resumeFile);
-                    formData.append('jdContent', this.jdContent);
-                    
-                    try {
-                        // 调用初始化接口
-                        const response = await fetch('/api/interview/init', {
-                            method: 'POST',
-                            body: formData
-                        });
-                        
-                        const result = await response.json();
-                        if (result.code === 200) {
-                            this.sessionId = result.data.sessionId;
-                            this.mode = result.data.mode;
-                            // 建立 SSE 连接获取初始问题
-                            this.connectSSE();
-                        } else {
-                            this.errorMessage = '初始化失败：' + result.msg;
-                            this.isInterviewing = false;
-                        }
-                    } catch (error) {
-                        console.error('初始化失败：', error);
-                        this.errorMessage = '初始化失败，请检查网络连接';
-                        this.isInterviewing = false;
-                    }
-                },
-                
-                async sendMessage() {
-                    if (!this.userInput.trim() || !this.sessionId) return;
-                    
-                    // 添加用户消息到聊天界面
-                    this.messages.push({
-                        type: 'user',
-                        content: this.userInput
-                    });
-                    
-                    // 保存用户输入
-                    const userMessage = this.userInput;
-                    // 清空输入框
-                    this.userInput = '';
-                    // 滚动到底部
-                    this.scrollToBottom();
-                    
-                    try {
-                        // 调用发送消息接口
-                        const response = await fetch('/api/interview/chat/send', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                sessionId: this.sessionId,
-                                userMessage: userMessage
-                            })
-                        });
-                        
-                        const result = await response.json();
-                        if (result.code === 200) {
-                            const messageId = result.data.messageId;
-                            // 建立 SSE 连接发送用户消息
-                            this.connectSSE(messageId);
-                        } else {
-                            this.errorMessage = '发送失败：' + result.msg;
-                        }
-                    } catch (error) {
-                        console.error('发送失败：', error);
-                        this.errorMessage = '发送失败，请检查网络连接';
-                    }
-                },
-                
-                connectSSE(messageId = null) {
-                    if (this.eventSource) {
-                        this.eventSource.close();
-                    }
-                    
-                    this.isTyping = true;
-                    this.errorMessage = '';
-                    
-                    let url = `/api/interview/chat/stream?sessionId=${this.sessionId}`;
-                    if (messageId) {
-                        url += `&messageId=${messageId}`;
-                    }
-                    
-                    this.eventSource = new EventSource(url);
-                    let aiResponse = '';
-                    let isNormalClose = false; // 新增：标记是否正常关闭
-                    
-                    this.eventSource.onmessage = (event) => {
-                        aiResponse += event.data;
-                        // 实时渲染，不等连接关闭
-                        this.updateLastAiMessage(aiResponse);
-                    };
-                    
-                    this.eventSource.onopen = () => {
-                        console.log('SSE 连接已建立');
-                    };
-                    
-                    // 正常结束标记
-                    this.eventSource.addEventListener('end', (event) => {
-                        console.log('面试结束');
-                        isNormalClose = true;
-                        this.isInterviewEnded = true;
-                    });
-                    
-                    // 状态更新
-                    this.eventSource.addEventListener('status', (event) => {
-                        try {
-                            const statusData = JSON.parse(event.data);
-                            console.log('状态更新：', statusData);
-                            this.currentStage = statusData.stage;
-                            this.stageTurnCount = statusData.stageTurnCount;
-                            this.totalTurns = statusData.totalTurns;
-                            this.scores = statusData.scores;
-                            this.questionTags = statusData.questionTags || [];
-                            
-                            isNormalClose = true;
-                            
-                            if (aiResponse) {
-                                const lastIndex = this.messages.length - 1;
-                                const lastMsg = this.messages[lastIndex];
-                                
-                                // 解析AI响应，只提取next_question显示在气泡框中
-                                let displayContent = aiResponse;
-                                try {
-                                    // 尝试从响应中解析JSON
-                                    const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-                                    if (jsonMatch) {
-                                        const parsedResponse = JSON.parse(jsonMatch[0]);
-                                        if (parsedResponse.next_question) {
-                                            // 只显示next_question
-                                            displayContent = parsedResponse.next_question;
-                                        }
-                                    }
-                                } catch (e) {
-                                    // 如果解析失败，使用原始内容但做简化处理
-                                    console.log('解析JSON失败，使用原始内容:', e);
-                                }
-                                
-                                // 流式结束，用处理后的内容渲染
-                                if (lastMsg && lastMsg.streaming) {
-                                    this.messages[lastIndex] = {
-                                        type: 'ai',
-                                        content: marked.parse(displayContent),
-                                        streaming: false
-                                    };
-                                }
-                                
-                                aiResponse = '';
-                                setTimeout(() => this.scrollToBottom(), 0);
-                            }
-                            
-                            this.isTyping = false;
-                            
-                        } catch (error) {
-                            console.error('解析状态更新失败：', error);
-                        }
-                    });
-                    
-                    // 修复：区分正常关闭和真实错误
-                    this.eventSource.addEventListener('error', (event) => {
-                        this.eventSource.close();
-                        this.isTyping = false;
-                        
-                        if (isNormalClose) {
-                            // 正常结束触发的 error，忽略
-                            console.log('SSE 正常关闭');
-                            return;
-                        }
-                        
-                        // 真实错误：连接从未正常完成
-                        console.error('SSE 真实错误：', event);
-                        this.errorMessage = 'AI 服务暂时不可用，请稍后重试';
-                    });
-                },
-                
-                // 新增辅助方法：实时更新最后一条 AI 消息
-                updateLastAiMessage(content) {
-                    const lastIndex = this.messages.length - 1;
-                    const lastMsg = this.messages[lastIndex];
-                    
-                    if (lastMsg && lastMsg.type === 'ai' && lastMsg.streaming) {
-                        // 用 Vue.set 或 $set 触发响应式更新
-                        this.$set(this.messages, lastIndex, {
-                            ...lastMsg,
-                            content: content
-                        });
-                    } else {
-                        // 新增一条流式消息
-                        this.messages.push({ 
-                            type: 'ai', 
-                            content: content, 
-                            streaming: true 
-                        });
-                        this.$nextTick(() => this.scrollToBottom());
-                    }
-                },
-                
-                async endInterview() {
-                    if (!this.sessionId) return;
-                    
-                    try {
-                        // 调用评估接口
-                        const response = await fetch('/api/interview/evaluate', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json'
-                            },
-                            body: JSON.stringify({
-                                sessionId: this.sessionId
-                            })
-                        });
-                        
-                        const result = await response.json();
-                        if (result.code === 200) {
-                            // 渲染评估报告
-                            const renderedReport = marked.parse(result.data.report);
-                            this.messages.push({
-                                type: 'ai',
-                                content: `# 面试评估报告\n${renderedReport}`
-                            });
-                            // 滚动到底部
-                            this.scrollToBottom();
-                            // 标记面试结束
-                            this.isInterviewEnded = true;
-                        } else {
-                            this.errorMessage = '评估失败：' + result.msg;
-                        }
-                    } catch (error) {
-                        console.error('评估失败：', error);
-                        this.errorMessage = '评估失败，请检查网络连接';
-                    }
-                },
-                
-                scrollToBottom() {
-                    setTimeout(() => {
-                        const chatContainer = document.querySelector('.chat-container');
-                        chatContainer.scrollTop = chatContainer.scrollHeight;
-                    }, 100);
-                }
+  </div>
+
+  <!-- Tailwind (load early but non-blocking) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            display: ['ZCOOL QingKe HuangYou', 'serif'],
+            body: ['Noto Sans SC', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            surface: { DEFAULT: '#181825', light: '#1e1e32', lighter: '#252540' },
+            border: { DEFAULT: '#2a2a3e', light: '#3a3a52' },
+            accent: { DEFAULT: '#f59e0b', hover: '#d97706', light: '#fbbf24' },
+            emerald: { DEFAULT: '#10b981', dark: '#059669' },
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.5s ease-out both',
+            'slide-up': 'slideUp 0.4s ease-out both',
+            'pulse-glow': 'pulseGlow 2s ease-in-out infinite',
+            'bounce-dot': 'bounceDot 1.4s infinite ease-in-out both',
+            'shimmer': 'shimmer 3s ease-in-out infinite',
+          },
+          keyframes: {
+            fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+            slideUp: { '0%': { opacity: '0', transform: 'translateY(12px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+            pulseGlow: { '0%, 100%': { boxShadow: '0 0 8px rgba(245,158,11,0.15)' }, '50%': { boxShadow: '0 0 20px rgba(245,158,11,0.3)' } },
+            shimmer: { '0%': { backgroundPosition: '-200% 0' }, '100%': { backgroundPosition: '200% 0' } },
+          }
+        }
+      }
+    }
+  </script>
+  <!-- Vue + marked -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@11.0.0/marked.min.js"></script>
+  <script>
+  const { createApp } = Vue;
+  createApp({
+    data() {
+      return {
+        jdContent: '',
+        resumeFile: null,
+        resumeName: '',
+        sessionId: null,
+        mode: null,
+        isInterviewing: false,
+        isInterviewEnded: false,
+        messages: [],
+        userInput: '',
+        isTyping: false,
+        errorMessage: '',
+        eventSource: null,
+        currentStage: null,
+        stageTurnCount: 0,
+        totalTurns: 0,
+        scores: null,
+        questionTags: [],
+        showContext: false,
+        msgCounter: 0,
+        stageList: ['OPENING','MOTIVATION','PROJECT','BACKEND','LLM_RAG','BEHAVIOR','CLOSEOUT'],
+        stageLabels: ['开场','动机','项目','后端','LLM/RAG','行为','收尾'],
+        scoreDefs: [
+          { key: 'clarity', label: '表达' },
+          { key: 'depth', label: '深度' },
+          { key: 'evidence', label: '量化' },
+          { key: 'tradeoff', label: '权衡' },
+          { key: 'retrospect', label: '复盘' },
+        ],
+      };
+    },
+    computed: {
+      phase() {
+        if (this.isInterviewEnded && this.messages.length > 0) return 'end';
+        if (this.sessionId) return 'interview';
+        return 'config';
+      },
+      stageIndex() {
+        const i = this.stageList.indexOf(this.currentStage);
+        return i >= 0 ? i : 0;
+      },
+    },
+    methods: {
+      scoreColor(v) {
+        if (!v) return '#374151';
+        if (v >= 8) return '#10b981';
+        if (v >= 6) return '#f59e0b';
+        if (v >= 4) return '#f97316';
+        return '#ef4444';
+      },
+      scoreTextColor(v) {
+        if (!v) return 'text-slate-600';
+        if (v >= 8) return 'text-emerald';
+        if (v >= 6) return 'text-accent';
+        if (v >= 4) return 'text-orange-400';
+        return 'text-red-400';
+      },
+      handleFileUpload(e) {
+        this.resumeFile = e.target.files[0];
+        this.resumeName = this.resumeFile ? this.resumeFile.name : '';
+      },
+      async startInterview() {
+        if (!this.jdContent || !this.resumeFile) return;
+        this.isInterviewing = true;
+        this.errorMessage = '';
+        const fd = new FormData();
+        fd.append('resume', this.resumeFile);
+        fd.append('jdContent', this.jdContent);
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 30000);
+          const resp = await fetch('/api/interview/init', { method: 'POST', body: fd, signal: controller.signal });
+          clearTimeout(timeout);
+          const r = await resp.json();
+          if (r.code === 200) {
+            this.sessionId = r.data.sessionId;
+            this.mode = r.data.mode;
+            this.isInterviewing = false;
+            this.connectSSE();
+          } else {
+            this.errorMessage = '初始化失败：' + r.msg;
+            this.isInterviewing = false;
+          }
+        } catch (e) {
+          this.errorMessage = e.name === 'AbortError' ? '连接超时，请重试' : '网络错误，请检查连接';
+          this.isInterviewing = false;
+        }
+      },
+      async sendMessage() {
+        if (!this.userInput.trim() || !this.sessionId) return;
+        this.messages.push({ type: 'user', content: this.userInput, _key: ++this.msgCounter });
+        const msg = this.userInput;
+        this.userInput = '';
+        this.$nextTick(() => this.scrollToBottom());
+        try {
+          const r = await (await fetch('/api/interview/chat/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: this.sessionId, userMessage: msg }),
+          })).json();
+          if (r.code === 200) this.connectSSE(r.data.messageId);
+          else this.errorMessage = '发送失败：' + r.msg;
+        } catch (e) { this.errorMessage = '发送失败，请检查网络'; }
+      },
+      connectSSE(mid) {
+        if (this.eventSource) this.eventSource.close();
+        this.isTyping = true;
+        this.errorMessage = '';
+        let url = `/api/interview/chat/stream?sessionId=${this.sessionId}`;
+        if (mid) url += `&messageId=${mid}`;
+        const es = new EventSource(url);
+        this.eventSource = es;
+        let isNormalClose = false;
+
+        es.addEventListener('token', (e) => {
+          const li = this.messages.length - 1;
+          const lm = this.messages[li];
+          if (lm && lm.type === 'ai' && lm.streaming) {
+            this.messages[li] = { ...lm, content: lm.content + e.data };
+          } else {
+            this.messages.push({ type: 'ai', content: e.data, streaming: true, _key: ++this.msgCounter });
+          }
+          this.$nextTick(() => this.scrollToBottom());
+        });
+
+        es.addEventListener('status', (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            this.currentStage = d.stage;
+            this.stageTurnCount = d.stageTurnCount;
+            this.totalTurns = d.totalTurns;
+            this.scores = d.scores;
+            this.questionTags = d.questionTags || [];
+            isNormalClose = true;
+            if (d.next_question) {
+              const li = this.messages.length - 1;
+              const lm = this.messages[li];
+              if (lm && lm.streaming) {
+                this.messages[li] = { type: 'ai', content: marked.parse(d.next_question), streaming: false, _key: lm._key };
+              } else {
+                this.messages.push({ type: 'ai', content: marked.parse(d.next_question), streaming: false, _key: ++this.msgCounter });
+              }
             }
-        }).mount('#app');
-    </script>
+            this.$nextTick(() => { this.scrollToBottom(); this.isTyping = false; });
+          } catch(e) { console.error('status parse error', e); this.isTyping = false; }
+        });
+
+        es.addEventListener('end', () => { isNormalClose = true; this.isInterviewEnded = true; this.isTyping = false; });
+        es.onerror = () => {
+          es.close();
+          this.isTyping = false;
+          if (!isNormalClose) this.errorMessage = 'AI 服务暂时不可用，请稍后重试';
+        };
+      },
+      async endInterview() {
+        if (!this.sessionId) return;
+        try {
+          const r = await (await fetch('/api/interview/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: this.sessionId }),
+          })).json();
+          if (r.code === 200) {
+            this.messages.push({ type: 'ai', content: marked.parse(r.data.report), _key: ++this.msgCounter });
+            this.isInterviewEnded = true;
+            this.$nextTick(() => this.scrollToBottom());
+          } else { this.errorMessage = '评估失败：' + r.msg; }
+        } catch(e) { this.errorMessage = '评估失败，请检查网络'; }
+      },
+      evaluateInterview() { this.endInterview(); },
+      scrollToBottom() {
+        this.$nextTick(() => {
+          const el = this.$refs.chatRef;
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      },
+    },
+    watch: {
+      phase() {
+        if (this.phase === 'interview' || this.phase === 'end') {
+          this.$nextTick(() => this.scrollToBottom());
+        }
+      },
+      messages: { deep: true, handler() { this.$nextTick(() => this.scrollToBottom()); } },
+    },
+  }).mount('#app');
+  </script>
 </body>
 </html>

@@ -16,6 +16,9 @@ public class MetadataExtractionService {
     @Resource
     private RedisMemoryService redisMemoryService;
 
+    @Resource
+    private CandidateProfileService candidateProfileService;
+
     /**
      * 候选人元数据结构
      */
@@ -157,6 +160,17 @@ public class MetadataExtractionService {
             
             // 保存到Redis
             redisMemoryService.saveCandidateProfile(sessionId, updatedProfile);
+
+            // 持久化到MySQL
+            candidateProfileService.saveOrUpdate(sessionId,
+                    updatedProfile.getTechnicalStack(),
+                    updatedProfile.getKeyProjects(),
+                    updatedProfile.getStrengths(),
+                    updatedProfile.getWeaknesses(),
+                    updatedProfile.getCareerGoals(),
+                    updatedProfile.getPainPoints(),
+                    updatedProfile.getWorkExperience(),
+                    updatedProfile.getEducation());
             
             System.out.println("[MetadataExtraction] 元数据提取完成：" + sessionId);
         } catch (Exception e) {

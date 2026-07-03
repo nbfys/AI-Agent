@@ -35,7 +35,7 @@ public class ThreadPoolConfig {
                         return new Thread(r, "sse-pool-" + threadNumber.getAndIncrement());
                     }
                 },
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                new ThreadPoolExecutor.AbortPolicy()
         );
     }
 
