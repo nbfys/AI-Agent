@@ -226,72 +226,14 @@ public class InterviewController {
                 }
             }
 
-            boolean shouldUseIntentHandling = false;
-            String intentHandlingResponse = null;
-            boolean shouldContinueStage = true;
-
-            // 待确认结束状态：如果用户回复确认，直接结束
-            boolean isPendingEndConfirm = "true".equals(state.get("pendingEndConfirm"));
-            if (isPendingEndConfirm && userMessage != null && !userMessage.isEmpty()) {
-                String trimmed = userMessage.trim();
-                if (trimmed.equals("确认") || trimmed.equals("是的") || trimmed.equals("嗯") || trimmed.equals("好")
-                        || trimmed.contains("确认结束") || trimmed.contains("结束面试") || trimmed.contains("不面了")) {
-                    interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
-                    emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
-                    emitter.send(SseEmitter.event().name("end").data("面试结束"));
-                    emitter.complete();
-                    return;
-                }
-                // 用户否认结束，清除标志继续面试
-                interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
-            }
-
+            // Intent detection → 生成上下文提示给 LLM（不再阻断）
+            String intentContextHint = "";
             if (userMessage != null && !userMessage.isEmpty()) {
                 IntentDetectionService.IntentResult intentResult =
                         intentDetectionService.detectIntent(userMessage, currentStage);
-
                 log.debug("意图检测结果，sessionId: {}, intent: {}", sessionId, intentResult.getIntentType());
-
-                if (intentResult.getIntentType() == IntentDetectionService.IntentType.COMPENSATION_QUESTION ||
-                        intentResult.getIntentType() == IntentDetectionService.IntentType.OFF_TOPIC ||
-                        intentResult.getIntentType() == IntentDetectionService.IntentType.SYSTEM_ISSUE ||
-                        intentResult.getIntentType() == IntentDetectionService.IntentType.INJECTION_ATTEMPT) {
-                    shouldUseIntentHandling = true;
-                    intentHandlingResponse = intentResult.getSuggestedResponse();
-                    shouldContinueStage = intentResult.isShouldContinueStage();
-                } else if (intentResult.getIntentType() == IntentDetectionService.IntentType.END_INTERVIEW) {
-                    boolean isPendingConfirm = "true".equals(state.get("pendingEndConfirm"));
-                    if (isPendingConfirm) {
-                        // 用户已确认结束 → 直接结束面试
-                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
-                        emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
-                        emitter.send(SseEmitter.event().name("end").data("面试结束"));
-                        emitter.complete();
-                        return;
-                    }
-
-                    boolean canEnd = shouldEndInterview(
-                            (String) state.get("stage"),
-                            (int) state.getOrDefault("stageTurnCount", 0),
-                            totalTurns, true);
-
-                    if (canEnd) {
-                        emitter.send(SseEmitter.event().data("好的，面试结束。正在生成评估报告..."));
-                        emitter.send(SseEmitter.event().name("end").data("面试结束"));
-                        emitter.complete();
-                        return;
-                    } else {
-                        shouldUseIntentHandling = true;
-                        intentHandlingResponse = "您确定要结束面试吗？我们还可以继续聊聊其他方面的问题。如果您确实想要结束，请再次确认。";
-                        shouldContinueStage = true;
-                        // 标记待确认状态
-                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "true"));
-                    }
-                } else {
-                    // 非END意图时，清除待确认状态
-                    if ("true".equals(state.get("pendingEndConfirm"))) {
-                        interviewStateService.updateState(sessionId, Map.of("pendingEndConfirm", "false"));
-                    }
+                if (intentResult.getContextHint() != null) {
+                    intentContextHint = "\n\n[系统观察]\n" + intentResult.getContextHint() + "\n";
                 }
             }
 
@@ -305,17 +247,10 @@ public class InterviewController {
 
             StringBuilder completePrompt = buildCompletePrompt(systemPrompt, askedQuestions,
                     currentStage, stageTurnCount, totalTurns, isFirstQuestion);
+            completePrompt.append(intentContextHint);
 
-            MetadataExtractionService.CandidateProfile profile =
-                    metadataExtractionService.getCandidateProfile(sessionId);
-
-            if (shouldUseIntentHandling) {
-                handleIntentResponse(sessionId, emitter, intentHandlingResponse, userMessage,
-                        currentStage, stageTurnCount, totalTurns, shouldContinueStage);
-            } else {
-                handleNormalResponse(sessionId, emitter, completePrompt.toString(), userMessage,
-                        history, currentStage, stageTurnCount, totalTurns);
-            }
+            handleNormalResponse(sessionId, emitter, completePrompt.toString(), userMessage,
+                    history, currentStage, stageTurnCount, totalTurns);
 
         } catch (Exception e) {
             log.error("处理流式请求异常，sessionId: {}", sessionId, e);
@@ -354,66 +289,18 @@ public class InterviewController {
         return completePrompt;
     }
 
-    private void handleIntentResponse(String sessionId, SseEmitter emitter, String intentHandlingResponse,
-                                      String userMessage, String currentStage, int stageTurnCount,
-                                      int totalTurns, boolean shouldContinueStage) throws Exception {
-        emitter.send(SseEmitter.event().data(intentHandlingResponse));
-        redisMemoryService.addMessage(sessionId, "AI：" + intentHandlingResponse);
-
-        if (userMessage != null) {
-            metadataExtractionService.extractAndUpdateMetadata(sessionId, userMessage, intentHandlingResponse);
-        }
-
-        String updatedStage = currentStage;
-        int updatedStageTurnCount = stageTurnCount;
-        int updatedTotalTurns = totalTurns + 1;
-
-        if (shouldContinueStage) {
-            updatedStageTurnCount++;
-        } else {
-            updatedStage = getNextStage(currentStage);
-            updatedStageTurnCount = 1;
-        }
-
-        if (updatedTotalTurns >= interviewConfig.getMaxTotalTurns()) {
-            if (!"CLOSEOUT".equals(updatedStage)) {
-                updatedStage = "CLOSEOUT";
-                updatedStageTurnCount = 1;
-            }
-        }
-
-        Map<String, Object> newState = new HashMap<>();
-        newState.put("stage", updatedStage);
-        newState.put("stageTurnCount", updatedStageTurnCount);
-        newState.put("totalTurns", updatedTotalTurns);
-        interviewStateService.updateState(sessionId, newState);
-
-        sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns, null, new ArrayList<>(), intentHandlingResponse);
-        checkAndSendEndSignal(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns);
-
-        // 持久化：更新MySQL会话状态 + 异步保存对话历史
-        List<String> history = redisMemoryService.getHistory(sessionId);
-        interviewSessionService.updateBySessionId(sessionId, "IN_PROGRESS", null);
-        interviewSessionService.asyncSaveHistory(sessionId, history);
-
-        emitter.complete();
-    }
-
     private void handleNormalResponse(String sessionId, SseEmitter emitter, String completePrompt,
                                        String userMessage, List<String> history, String currentStage,
                                        int stageTurnCount, int totalTurns) throws Exception {
         log.debug("开始流式调用LLM服务，sessionId: {}", sessionId);
 
-        // BlockingQueue 容量1：生产一个消费一个，实现天然背压
         java.util.concurrent.BlockingQueue<String> queue = new java.util.concurrent.ArrayBlockingQueue<>(1);
 
-        // 在后台线程运行LLM流式请求
         java.util.concurrent.CompletableFuture.runAsync(() ->
                 llmService.generateStream(completePrompt, userMessage, history, queue),
                 sseExecutor
         );
 
-        // 后台线程逐个读取并缓冲（不推送到前端，等完整结果后只显示问题）
         StringBuilder fullBuffer = new StringBuilder();
         try {
             while (true) {
@@ -432,151 +319,40 @@ public class InterviewController {
         String fullAiResponse = fullBuffer.toString();
         log.debug("LLM流式调用成功，响应长度: {}", fullAiResponse.length());
 
-        // LLM输出后置自检：检测到异常内容则替换为兜底问题
-        boolean outputSafe = intentDetectionService.checkOutput(fullAiResponse);
-        if (!outputSafe) {
-            log.warn("LLM输出包含异常内容，已拦截替换为兜底问题，sessionId: {}", sessionId);
-            fullAiResponse = getFallbackQuestion(currentStage);
+        // LLM输出后置检查：仅记录警告，不替换输出
+        if (!intentDetectionService.checkOutput(fullAiResponse)) {
+            log.warn("LLM输出可能包含异常内容，但仍正常使用（仅记录日志），sessionId: {}", sessionId);
         }
 
-        StringBuilder fullResponse = new StringBuilder(fullAiResponse);
-        LLMService.InterviewResponse interviewResponse;
+        // 提取显示内容（去掉末尾JSON部分）
+        String cleanDisplayContent = stripJsonBlock(fullAiResponse);
 
-        if (!outputSafe) {
-            interviewResponse = new LLMService.InterviewResponse(
-                    java.util.List.of("请继续回答"), fullAiResponse, currentStage, false,
-                    java.util.List.of("综合"), null);
-        } else {
-            interviewResponse = llmService.parseStructuredOutput(fullResponse.toString(), currentStage);
-        }
+        // 解析结构化输出
+        LLMService.InterviewResponse interviewResponse =
+                llmService.parseStructuredOutput(fullAiResponse, currentStage);
+        String nextQuestion = interviewResponse.getNextQuestion();
+        String llmStage = interviewResponse.getStage();
 
-        String originalQuestion = interviewResponse.getNextQuestion();
+        // 问题去重检查（仅记录，不重试）
         Set<Object> existingQuestions = redisMemoryService.getAskedQuestions(sessionId);
-        boolean shouldRegenerate = false;
-        String finalQuestion = originalQuestion;
-
-        // 先判断是否是追问话术（追问不算重复问题）
-        if (isFollowUpPhrase(originalQuestion)) {
-            log.debug("识别为追问话术，直接使用：{}", originalQuestion);
-        } else if (isQuestionDuplicate(originalQuestion, existingQuestions)) {
-            // 只有真正的技术问题才检测重复
-            log.warn("检测到重复问题，尝试重新生成，sessionId: {}, 问题: {}", sessionId, originalQuestion);
-            shouldRegenerate = true;
+        if (!isFollowUpPhrase(nextQuestion) && isQuestionDuplicate(nextQuestion, existingQuestions)) {
+            log.warn("检测到重复问题，但由LLM自行处理，sessionId: {}, 问题: {}", sessionId, nextQuestion);
         }
 
-        // 如果需要重新生成问题 - 增加重试和兜底逻辑
-        if (shouldRegenerate) {
-            log.info("检测到重复问题，开始重新生成，sessionId: {}, 原问题: {}", sessionId, originalQuestion);
-            
-            int maxRetries = interviewConfig.getMaxRegenerateRetries();
-            boolean regenerateSuccess = false;
-            
-            for (int retry = 0; retry < maxRetries && !regenerateSuccess; retry++) {
-                try {
-                    StringBuilder regeneratePrompt = buildRegeneratePrompt(
-                        completePrompt, originalQuestion, existingQuestions, currentStage
-                    );
-                    
-                    String newResponse = llmService.generateResponse(regeneratePrompt.toString(), userMessage, history);
-                    LLMService.InterviewResponse newInterviewResponse = llmService.parseStructuredOutput(newResponse, currentStage);
-                    String newQuestion = newInterviewResponse.getNextQuestion();
-                    
-                    // 检查新问题是否还重复
-                    if (!isFollowUpPhrase(newQuestion) && 
-                        isQuestionDuplicate(newQuestion, existingQuestions)) {
-                        
-                        log.warn("重新生成的问题仍重复（重试{}/{}），新问题: {}", 
-                                 retry + 1, maxRetries, newQuestion);
-                        continue;
-                    }
-                    
-                    // 成功
-                    log.info("重新生成问题成功（重试{}/{}），新问题: {}", retry + 1, maxRetries, newQuestion);
-                    finalQuestion = newQuestion;
-                    fullResponse = new StringBuilder(newResponse);
-                    interviewResponse = newInterviewResponse;
-                    regenerateSuccess = true;
-                    
-                } catch (Exception e) {
-                    log.error("重新生成问题异常（重试{}/{}），sessionId: {}", 
-                             retry + 1, maxRetries, sessionId, e);
-                }
-            }
-            
-            // 兜底处理
-            if (!regenerateSuccess) {
-                log.error("所有重试均失败，使用兜底策略，sessionId: {}", sessionId);
-                finalQuestion = getFallbackQuestion(currentStage);
-                // 构建一个简单的兜底响应
-                try {
-                    ObjectMapper objectMapper = new ObjectMapper();
-                    Map<String, Object> fallbackMap = new HashMap<>();
-                    fallbackMap.put("feedback", List.of("继续深入探讨项目细节。"));
-                    fallbackMap.put("next_question", finalQuestion);
-                    fallbackMap.put("stage", currentStage);
-                    fallbackMap.put("should_move_stage", false);
-                    fallbackMap.put("question_tags", List.of("技术深度"));
-                    fallbackMap.put("scores", Map.of(
-                        "clarity", 8,
-                        "depth", 7,
-                        "evidence", 8,
-                        "tradeoff", 6,
-                        "retrospect", 7
-                    ));
-                    String fallbackJson = objectMapper.writeValueAsString(fallbackMap);
-                    fullResponse = new StringBuilder(fallbackJson);
-                    // 重新解析为InterviewResponse
-                    interviewResponse = llmService.parseStructuredOutput(fallbackJson, currentStage);
-                } catch (Exception e) {
-                    log.error("构建兜底响应失败: {}", e.getMessage(), e);
-                }
-            }
-        }
-
-        ObjectMapper objectMapper = new ObjectMapper();
-        String cleanAiResponse = stripJsonBlock(fullResponse.toString());
-        String displayContent = cleanAiResponse;
-
-        log.debug("最终显示内容，sessionId: {}, content: {}", sessionId, displayContent);
-
-        // 存储到Redis（不含JSON部分）
-        redisMemoryService.addMessage(sessionId, "AI：" + displayContent);
-        
-        // 只有真正的技术问题才存入askedQuestions，追问话术不存
-        if (!isFollowUpPhrase(finalQuestion)) {
-            redisMemoryService.addAskedQuestion(sessionId, finalQuestion);
+        // 存储到Redis
+        redisMemoryService.addMessage(sessionId, "AI：" + cleanDisplayContent);
+        if (!isFollowUpPhrase(nextQuestion)) {
+            redisMemoryService.addAskedQuestion(sessionId, nextQuestion);
         }
 
         if (userMessage != null) {
-            metadataExtractionService.extractAndUpdateMetadata(sessionId, userMessage, cleanAiResponse);
+            metadataExtractionService.extractAndUpdateMetadata(sessionId, userMessage, cleanDisplayContent);
         }
 
-        // 计算阶段推进 - 修复：移除shouldRegenerate条件
-        String updatedStage = currentStage;
-        int updatedStageTurnCount = stageTurnCount;
+        // 状态更新：优先使用LLM决定的stage
+        String updatedStage = (llmStage != null && STAGES.contains(llmStage)) ? llmStage : currentStage;
         int updatedTotalTurns = totalTurns + 1;
-        
-        // 只根据LLM建议和轮次限制推进
-        boolean shouldAdvance = interviewResponse.isShouldMoveStage() || 
-                               (updatedStageTurnCount + 1) > interviewConfig.getMaxStageTurns();
-
-        updatedStageTurnCount++;
-        if (shouldAdvance) {
-            String oldStage = updatedStage;
-            updatedStage = getNextStage(currentStage);
-            updatedStageTurnCount = 1;
-            
-            log.info("推进到下一阶段：{} -> {}（原因: {}）", 
-                     oldStage, updatedStage,
-                     interviewResponse.isShouldMoveStage() ? "LLM建议" : "达到最大轮次");
-        }
-
-        if (updatedTotalTurns >= interviewConfig.getMaxTotalTurns()) {
-            if (!"CLOSEOUT".equals(updatedStage)) {
-                updatedStage = "CLOSEOUT";
-                updatedStageTurnCount = 1;
-            }
-        }
+        int updatedStageTurnCount = updatedStage.equals(currentStage) ? stageTurnCount + 1 : 1;
 
         Map<String, Object> newState = new HashMap<>();
         newState.put("stage", updatedStage);
@@ -584,12 +360,12 @@ public class InterviewController {
         newState.put("totalTurns", updatedTotalTurns);
         interviewStateService.updateState(sessionId, newState);
 
-        // 流式输出最终问题（逐字推送）
-        if (finalQuestion != null && !finalQuestion.isBlank()) {
-            for (char c : finalQuestion.toCharArray()) {
+        // 流式输出问题（逐字推送）
+        if (nextQuestion != null && !nextQuestion.isBlank()) {
+            for (char c : nextQuestion.toCharArray()) {
                 try {
                     emitter.send(SseEmitter.event().name("token").data(String.valueOf(c)));
-                    Thread.sleep(15); // ~66字符/秒，模拟自然书写速度
+                    Thread.sleep(15);
                 } catch (Exception e) {
                     log.debug("流式输出被中断，sessionId: {}", sessionId);
                     break;
@@ -597,12 +373,11 @@ public class InterviewController {
             }
         }
 
-        // 更新should_move_stage为实际阶段推进状态
-        sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns,
-                interviewResponse.getScores(), interviewResponse.getQuestionTags(), finalQuestion);
+        // 发送状态更新（无评分）
+        sendStatusUpdate(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns, nextQuestion);
         checkAndSendEndSignal(emitter, updatedStage, updatedStageTurnCount, updatedTotalTurns);
 
-        // 持久化：更新MySQL会话状态 + 异步保存对话历史
+        // 持久化
         List<String> currentHistory = redisMemoryService.getHistory(sessionId);
         interviewSessionService.updateBySessionId(sessionId, "IN_PROGRESS", null);
         interviewSessionService.asyncSaveHistory(sessionId, currentHistory);
@@ -611,53 +386,14 @@ public class InterviewController {
         emitter.complete();
     }
     
-    private StringBuilder buildRegeneratePrompt(String basePrompt, String duplicateQuestion,
-                                             Set<Object> existingQuestions, String currentStage) {
-        StringBuilder prompt = new StringBuilder(basePrompt);
-        prompt.append("\n\n【紧急提示：问题重复】\n");
-        prompt.append("刚才生成的问题：'").append(duplicateQuestion).append("'\n");
-        prompt.append("这个问题已经问过了！请生成一个完全不同的新问题。\n\n");
-        
-        prompt.append("已问过的所有问题：\n");
-        int i = 1;
-        for (Object q : existingQuestions) {
-            if (i <= 10) { // 显示最近10个
-                prompt.append(i++).append(". ").append(q.toString()).append("\n");
-            }
-        }
-        
-        prompt.append("\n要求：\n");
-        prompt.append("1. 新问题必须是具体的技术问题，不能只是追问话术\n");
-        prompt.append("2. 不能与上述任何问题相似\n");
-        prompt.append("3. 要符合当前阶段：").append(currentStage).append("\n");
-        prompt.append("4. 要基于候选人简历中尚未深入讨论的技术点\n");
-        
-        return prompt;
-    }
-    
-    private String getFallbackQuestion(String stage) {
-        Map<String, String> fallbackQuestions = Map.of(
-            "PROJECT", "请介绍一个您最近参与的技术改进项目，包括背景、方案和效果",
-            "BACKEND", "在分布式系统中，您是如何处理数据一致性问题的？",
-            "LLM_RAG", "您认为在生产环境中部署LLM应用，最需要关注哪些问题？",
-            "BEHAVIOR", "请分享一次您推动团队技术升级的经历",
-            "CLOSEOUT", "您对我们公司或这个岗位还有什么想了解的吗？"
-        );
-        
-        return fallbackQuestions.getOrDefault(stage, "请继续分享您的项目经验");
-    }
-
     private void sendStatusUpdate(SseEmitter emitter, String stage, int stageTurnCount,
-                                  int totalTurns, Map<String, Integer> scores, List<String> questionTags,
-                                  String nextQuestion) {
+                                  int totalTurns, String nextQuestion) {
         try {
             ObjectMapper objectMapper = new ObjectMapper();
             Map<String, Object> statusUpdate = new HashMap<>();
             statusUpdate.put("stage", stage);
             statusUpdate.put("stageTurnCount", stageTurnCount);
             statusUpdate.put("totalTurns", totalTurns);
-            statusUpdate.put("scores", scores);
-            statusUpdate.put("questionTags", questionTags != null ? questionTags : new ArrayList<>());
             statusUpdate.put("next_question", nextQuestion);
             String statusJson = objectMapper.writeValueAsString(statusUpdate);
             emitter.send(SseEmitter.event().name("status").data(statusJson));
@@ -666,28 +402,23 @@ public class InterviewController {
         }
     }
 
-    private boolean shouldEndInterview(String stage, int stageTurnCount, int totalTurns, boolean userRequestedEnd) {
-        // 情况1：用户明确要求结束，且至少面试了最低轮次
-        if (userRequestedEnd && totalTurns >= interviewConfig.getMinTurnsBeforeEnd()) {
-            return true;
-        }
-        
-        // 情况2：达到最大轮次
+    private boolean shouldEndInterview(String stage, int stageTurnCount, int totalTurns) {
+        // 情况1：达到最大轮次
         if (totalTurns > interviewConfig.getMaxTotalTurns()) {
             return true;
         }
-        
-        // 情况3：在CLOSEOUT阶段且完成了至少2轮对话
+
+        // 情况2：在CLOSEOUT阶段且完成了至少2轮对话
         if ("CLOSEOUT".equals(stage) && stageTurnCount >= 2) {
             return true;
         }
-        
+
         return false;
     }
     
     private void checkAndSendEndSignal(SseEmitter emitter, String stage, int stageTurnCount, int totalTurns) {
         try {
-            boolean shouldEnd = shouldEndInterview(stage, stageTurnCount, totalTurns, false);
+            boolean shouldEnd = shouldEndInterview(stage, stageTurnCount, totalTurns);
 
             if (shouldEnd) {
                 emitter.send(SseEmitter.event().name("end").data("面试结束"));

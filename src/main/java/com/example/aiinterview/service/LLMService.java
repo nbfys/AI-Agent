@@ -180,85 +180,30 @@ public class LLMService {
     }
 
     private InterviewResponse buildDefaultResponse(String currentStage) {
-        // 修复：OPENING 阶段降级时返回合适的开场问题
-        if ("OPENING".equals(currentStage)) {
-            return new InterviewResponse(
-                List.of("欢迎参加本次面试，请先做个自我介绍"),
-                "请先做个自我介绍，包括您的技术背景和主要经验",
-                "OPENING",
-                false,
-                List.of("开场"),
-                Map.of("clarity", 5, "depth", 5, "evidence", 5, "tradeoff", 5, "retrospect", 5)
-            );
+        String stage = (currentStage != null) ? currentStage : "OPENING";
+        String question = "请先做个自我介绍，包括您的技术背景和主要经验";
+        if (!"OPENING".equals(stage)) {
+            question = "请继续分享您的想法，还有哪些方面想深入谈谈？";
         }
-
-        Map<String, Integer> defaultScores = new HashMap<>();
-        defaultScores.put("clarity",    5);
-        defaultScores.put("depth",      5);
-        defaultScores.put("evidence",   5);
-        defaultScores.put("tradeoff",   5);
-        defaultScores.put("retrospect", 5);
-
-        String actualStage = (currentStage != null) ? currentStage : "PROJECT";
-
-        List<String> defaultQuestions = List.of(
-            "请继续阐述您的想法",
-            "能否提供更多细节？",
-            "还有什么想补充的吗？",
-            "请展开说明一下",
-            "您能解释一下吗？"
-        );
-        String randomQuestion = defaultQuestions.get((int) (System.currentTimeMillis() % defaultQuestions.size()));
-
-        return new InterviewResponse(
-            List.of("感谢您的回答", "请继续"),
-            randomQuestion,
-            actualStage,
-            false,
-            List.of("追问"),
-            defaultScores
-        );
+        return new InterviewResponse(question, stage);
     }
 
     public static class InterviewResponse {
-        @com.fasterxml.jackson.annotation.JsonProperty("feedback")
-        private List<String> feedback;
-
         @com.fasterxml.jackson.annotation.JsonProperty("next_question")
         private String nextQuestion;
 
         @com.fasterxml.jackson.annotation.JsonProperty("stage")
         private String stage;
 
-        @com.fasterxml.jackson.annotation.JsonProperty("should_move_stage")
-        private boolean shouldMoveStage;
-
-        @com.fasterxml.jackson.annotation.JsonProperty("question_tags")
-        private List<String> questionTags;
-
-        @com.fasterxml.jackson.annotation.JsonProperty("scores")
-        private Map<String, Integer> scores;
-
         public InterviewResponse() {}
 
-        public InterviewResponse(
-                List<String> feedback, String nextQuestion, String stage,
-                boolean shouldMoveStage, List<String> questionTags,
-                Map<String, Integer> scores) {
-            this.feedback        = feedback;
-            this.nextQuestion    = nextQuestion;
-            this.stage           = stage;
-            this.shouldMoveStage = shouldMoveStage;
-            this.questionTags    = questionTags;
-            this.scores          = scores;
+        public InterviewResponse(String nextQuestion, String stage) {
+            this.nextQuestion = nextQuestion;
+            this.stage = stage;
         }
 
-        public List<String> getFeedback()        { return feedback; }
-        public String getNextQuestion()          { return nextQuestion; }
-        public String getStage()                 { return stage; }
-        public boolean isShouldMoveStage()       { return shouldMoveStage; }
-        public List<String> getQuestionTags()    { return questionTags; }
-        public Map<String, Integer> getScores()  { return scores; }
+        public String getNextQuestion() { return nextQuestion; }
+        public String getStage()        { return stage; }
     }
 
     // Message types
