@@ -220,10 +220,10 @@
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 12h14M12 5l7 7-7 7"/></svg>
                 </button>
               </div>
-              <button @click="endInterview" :disabled="!sessionId || isInterviewEnded"
+              <button @click="endInterview" :disabled="!sessionId || isInterviewEnded || isEvaluating"
                 class="px-3 py-3 rounded-xl border text-xs font-medium transition-all duration-200"
-                :class="isInterviewEnded ? 'border-border text-slate-600' : 'border-border hover:border-red-800/40 text-slate-400 hover:text-red-300 hover:bg-red-900/10'">
-                <span class="hidden sm:inline">结束</span>
+                :class="isInterviewEnded || isEvaluating ? 'border-border text-slate-600' : 'border-border hover:border-red-800/40 text-slate-400 hover:text-red-300 hover:bg-red-900/10'">
+                <span class="hidden sm:inline">{{ isEvaluating ? '生成中...' : '结束' }}</span>
                 <svg class="w-4 h-4 sm:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
               </button>
             </div>
@@ -291,9 +291,10 @@
 
           <!-- End Interview Button -->
           <div class="p-4 mt-auto" v-if="!isInterviewEnded">
-            <button @click="endInterview"
-              class="w-full py-2 rounded-lg border border-border text-xs text-slate-400 hover:text-red-300 hover:border-red-800/40 hover:bg-red-900/5 transition-all duration-200">
-              结束当前面试
+            <button @click="endInterview" :disabled="isEvaluating"
+              class="w-full py-2 rounded-lg border text-xs transition-all duration-200"
+              :class="isEvaluating ? 'border-slate-700 text-slate-600 cursor-not-allowed' : 'border-border text-slate-400 hover:text-red-300 hover:border-red-800/40 hover:bg-red-900/5'">
+              {{ isEvaluating ? '报告生成中...' : '结束当前面试' }}
             </button>
           </div>
           <div class="p-4 mt-auto" v-if="isInterviewEnded">
@@ -511,7 +512,9 @@
         };
       },
       async endInterview() {
-        if (!this.sessionId) return;
+        if (this.isEvaluating || !this.sessionId || this.isInterviewEnded) return;
+        this.isEvaluating = true;
+        this.errorMessage = '';
         try {
           const r = await (await fetch('/api/interview/evaluate', {
             method: 'POST',
@@ -524,6 +527,7 @@
             this.$nextTick(() => this.scrollToBottom());
           } else { this.errorMessage = '评估失败：' + r.msg; }
         } catch(e) { this.errorMessage = '评估失败，请检查网络'; }
+        finally { this.isEvaluating = false; }
       },
       async evaluateInterview() {
         if (this.isEvaluating || !this.sessionId) return;
