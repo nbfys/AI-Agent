@@ -252,7 +252,7 @@ public class InterviewController {
             // CLOSEOUT 最后轮次：通知 LLM 生成结束语
             if ("CLOSEOUT".equals(currentStage) && stageTurnCount >= 1
                     && userMessage != null && !userMessage.isEmpty()) {
-                completePrompt.append("\n[系统提示：这是最后一轮对话，请在回复中包含结束语，自然结束面试]\n");
+                completePrompt.append("\n[系统提示：这是最后一轮对话。请先认真回答候选人提出的所有问题，不要忽略候选人的提问，回答完毕后自然收尾结束面试]\n");
             }
 
             handleNormalResponse(sessionId, emitter, completePrompt.toString(), userMessage,
