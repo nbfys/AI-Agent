@@ -236,18 +236,15 @@
           <div class="p-4 border-b border-border">
             <div class="text-[11px] font-medium tracking-wider text-slate-500 uppercase mb-3">面试进度</div>
             <div class="flex items-center justify-between mb-1.5">
-              <span class="text-xs text-slate-400">轮次</span>
-              <span class="text-xs font-mono text-slate-300">{{ totalTurns }} / 20</span>
+              <span class="text-xs text-slate-400">总轮次</span>
+              <span class="text-xs font-mono text-slate-300">{{ totalTurns }} 轮</span>
             </div>
             <div class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
-              <div class="h-full rounded-full transition-all duration-500 ease-out" :style="{width: Math.min(totalTurns/20*100, 100)+'%', background: 'linear-gradient(90deg, #f59e0b, #fbbf24)'}"></div>
+              <div class="h-full rounded-full transition-all duration-500 ease-out" :style="{width: Math.min(totalTurns/15*100, 100)+'%', background: 'linear-gradient(90deg, #f59e0b, #fbbf24)'}"></div>
             </div>
             <div class="flex items-center justify-between mt-3">
-              <span class="text-xs text-slate-400">阶段</span>
-              <span class="text-xs font-mono text-slate-300">{{ stageTurnCount }} / 4</span>
-            </div>
-            <div class="w-full h-1 rounded-full bg-slate-800 overflow-hidden">
-              <div class="h-full rounded-full transition-all duration-500 ease-out" :style="{width: Math.min(stageTurnCount/4*100, 100)+'%', background: 'linear-gradient(90deg, #10b981, #34d399)'}"></div>
+              <span class="text-xs text-slate-400">当前阶段</span>
+              <span class="text-xs font-mono text-slate-300">{{ stageTurnCount }} 轮</span>
             </div>
           </div>
 
@@ -300,9 +297,14 @@
             </button>
           </div>
           <div class="p-4 mt-auto" v-if="isInterviewEnded">
-            <button @click="evaluateInterview"
-              class="w-full py-2.5 rounded-xl text-xs font-medium transition-all duration-200 bg-accent text-[#0b0e17] hover:bg-accent-hover active:scale-[0.98]">
-              查看评估报告
+            <button @click="evaluateInterview" :disabled="isEvaluating"
+              class="w-full py-2.5 rounded-xl text-xs font-medium transition-all duration-200"
+              :class="isEvaluating ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-accent text-[#0b0e17] hover:bg-accent-hover active:scale-[0.98]'">
+              <span v-if="isEvaluating" class="flex items-center justify-center gap-2">
+                <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"/></svg>
+                报告生成中...
+              </span>
+              <span v-else>查看评估报告</span>
             </button>
           </div>
         </aside>
@@ -371,6 +373,7 @@
         totalTurns: 0,
         scores: null,
         questionTags: [],
+        isEvaluating: false,
         showContext: false,
         msgCounter: 0,
         stageList: ['OPENING','MOTIVATION','PROJECT','BACKEND','LLM_RAG','BEHAVIOR','CLOSEOUT'],
@@ -522,7 +525,28 @@
           } else { this.errorMessage = '评估失败：' + r.msg; }
         } catch(e) { this.errorMessage = '评估失败，请检查网络'; }
       },
-      evaluateInterview() { this.endInterview(); },
+      async evaluateInterview() {
+        if (this.isEvaluating || !this.sessionId) return;
+        this.isEvaluating = true;
+        this.errorMessage = '';
+        try {
+          const r = await (await fetch('/api/interview/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: this.sessionId }),
+          })).json();
+          if (r.code === 200) {
+            this.messages.push({ type: 'ai', content: marked.parse(r.data.report), _key: ++this.msgCounter });
+            this.$nextTick(() => this.scrollToBottom());
+          } else {
+            this.errorMessage = '评估失败：' + r.msg;
+          }
+        } catch(e) {
+          this.errorMessage = '评估失败，请检查网络';
+        } finally {
+          this.isEvaluating = false;
+        }
+      },
       scrollToBottom() {
         this.$nextTick(() => {
           const el = this.$refs.chatRef;

@@ -249,6 +249,12 @@ public class InterviewController {
                     currentStage, stageTurnCount, totalTurns, isFirstQuestion);
             completePrompt.append(intentContextHint);
 
+            // CLOSEOUT 最后轮次：通知 LLM 生成结束语
+            if ("CLOSEOUT".equals(currentStage) && stageTurnCount >= 1
+                    && userMessage != null && !userMessage.isEmpty()) {
+                completePrompt.append("\n[系统提示：这是最后一轮对话，请在回复中包含结束语，自然结束面试]\n");
+            }
+
             handleNormalResponse(sessionId, emitter, completePrompt.toString(), userMessage,
                     history, currentStage, stageTurnCount, totalTurns);
 
